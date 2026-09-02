@@ -1,0 +1,10 @@
+{
+  "name": "Herdr 移动控制台",
+  "short_name": "Herdr",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08110e",
+  "theme_color": "#091411",
+  "description": "从手机查看并聚焦 Herdr 会话",
+  "icons": [{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

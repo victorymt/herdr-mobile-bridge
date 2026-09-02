@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+config/*.json
+state/*.json
+state/*.lock
+coverage/
+dist/

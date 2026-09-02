@@ -1,0 +1,20 @@
+id = "herdr.mobile-bridge"
+name = "Herdr Mobile Bridge"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "A local, bidirectional mobile dashboard and Web Push bridge for Herdr agent status."
+platforms = ["linux"]
+
+[[startup]]
+command = ["node", "src/launcher.js", "ensure"]
+platforms = ["linux"]
+
+[[events]]
+on = "pane.agent_status_changed"
+platforms = ["linux"]
+command = ["node", "src/event-hook.js"]
+
+[[events]]
+on = "pane.agent_detected"
+platforms = ["linux"]
+command = ["node", "src/event-hook.js"]
