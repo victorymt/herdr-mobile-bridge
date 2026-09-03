@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#091411">
+  <meta name="theme-color" content="#0c1a15">
   <meta name="description" content="Herdr 智能体移动控制台">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/styles.css">
@@ -17,6 +17,12 @@
       <p class="eyebrow">HERDR / MOBILE BRIDGE</p>
       <h1 id="login-title">把会话带到手机上</h1>
       <p class="login-copy">输入本机桥接令牌，查看智能体状态，并在需要时从手机发送任务或交互输入。</p>
+      <section class="connection-guide" aria-labelledby="connection-guide-title">
+        <div class="connection-guide-heading"><h2 id="connection-guide-title">连接到本机服务</h2><button type="button" class="text-button" id="discovery-refresh">重新检测</button></div>
+        <p id="discovery-status" class="discovery-status" role="status" aria-live="polite">正在检测局域网地址…</p>
+        <div id="discovery-urls" class="discovery-urls"></div>
+        <p id="discovery-hint" class="discovery-hint">二维码不会包含访问令牌。请确认手机与电脑在同一网络。</p>
+      </section>
       <form id="login-form" novalidate>
         <label for="token">访问令牌</label>
         <div class="token-field"><input id="token" name="token" type="password" autocomplete="current-password" spellcheck="false" required placeholder="粘贴 bridge token"><button type="button" class="reveal-button" id="reveal-token" aria-label="显示令牌">显示</button></div>
@@ -39,7 +45,9 @@
       <div class="metrics" aria-label="状态摘要"><div><b id="metric-state">—</b><span>状态</span></div><div><b id="metric-focus">—</b><span>当前聚焦</span></div><div><b id="metric-output">—</b><span>窗格数量</span></div></div>
     </section>
 
-    <nav class="tabs" aria-label="控制台视图" role="tablist"><button class="tab is-active" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview-view" data-view="overview">总览</button><button class="tab" id="tab-output" role="tab" aria-selected="false" aria-controls="output-view" data-view="output">最近输出</button><button class="tab" id="tab-focus" role="tab" aria-selected="false" aria-controls="focus-view" data-view="focus">聚焦</button><button class="tab" id="tab-control" role="tab" aria-selected="false" aria-controls="control-view" data-view="control">控制</button><button class="tab attention-tab" id="tab-attention" role="tab" aria-selected="false" aria-controls="attention-view" data-view="attention" hidden><span>待处理</span><span class="attention-tab-badge" id="attention-tab-badge" aria-label="有新的待处理通知">!</span></button></nav>
+    <div class="dashboard-grid">
+      <div class="main-column">
+      <nav class="tabs" aria-label="控制台视图" role="tablist"><button class="tab is-active" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview-view" data-view="overview">总览</button><button class="tab" id="tab-output" role="tab" aria-selected="false" aria-controls="output-view" data-view="output">最近输出</button><button class="tab" id="tab-focus" role="tab" aria-selected="false" aria-controls="focus-view" data-view="focus">聚焦</button><button class="tab" id="tab-control" role="tab" aria-selected="false" aria-controls="control-view" data-view="control">控制</button><button class="tab attention-tab" id="tab-attention" role="tab" aria-selected="false" aria-controls="attention-view" data-view="attention" hidden><span>待处理</span><span class="attention-tab-badge" id="attention-tab-badge" aria-label="有新的待处理通知">!</span></button></nav>
 
     <section class="view is-hidden attention-view" id="attention-view" role="tabpanel" aria-labelledby="tab-attention" hidden>
       <div class="section-heading"><div><p class="eyebrow">ACTION PANEL</p><h3 id="attention-heading" tabindex="-1">需要你的关注</h3></div><span class="attention-status" id="attention-status" data-status="unknown">—</span></div>
@@ -125,8 +133,20 @@
       </div>
     </section>
 
+      </div>
+      <aside class="utility-rail" aria-label="快捷操作">
+        <section class="rail-card quick-actions-card">
+          <div class="section-heading"><div><p class="eyebrow">SHORTCUTS</p><h3>快速入口</h3></div><span class="rail-kicker" aria-hidden="true">⌘</span></div>
+          <div class="quick-actions">
+            <button class="quick-action" type="button" data-view="output"><span><strong>最近输出</strong><small>查看窗格日志</small></span><span aria-hidden="true">↗</span></button>
+            <button class="quick-action" type="button" data-view="focus"><span><strong>聚焦会话</strong><small>切换工作区或窗格</small></span><span aria-hidden="true">↗</span></button>
+            <button class="quick-action" type="button" data-view="control"><span><strong>控制窗格</strong><small>发送任务或输入</small></span><span aria-hidden="true">↗</span></button>
+          </div>
+        </section>
+        <section class="push-card" id="push-card"><div class="push-copy"><div class="push-symbol" aria-hidden="true">◌</div><div><p class="eyebrow">NOTIFICATIONS</p><h3>任务提醒</h3><p>完成或阻塞时，在手机上收到轻量提醒。</p></div></div><button class="primary-button" id="push-button" type="button">开启提醒</button></section>
+      </aside>
+    </div>
 
-    <section class="push-card" id="push-card"><div class="push-copy"><div class="push-symbol" aria-hidden="true">◌</div><div><p class="eyebrow">NOTIFICATIONS</p><h3>任务提醒</h3><p>完成或阻塞时，在手机上收到轻量提醒。</p></div></div><button class="primary-button" id="push-button" type="button">开启提醒</button></section>
     <div class="offline-banner" id="offline-banner" role="status" hidden>暂时离线，正在重试连接…</div>
     <p class="footer-note">Herdr 移动桥接 · <span id="version-label">本地服务</span></p>
   </main>

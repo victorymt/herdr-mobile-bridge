@@ -102,6 +102,33 @@ function setAuthenticated(value) {
   $('app-shell').hidden = !value;
 }
 
+async function discoverBridge() {
+  const status = $('discovery-status');
+  const urls = $('discovery-urls');
+  if (!status || !urls) return;
+  status.textContent = '正在检测局域网地址…';
+  urls.replaceChildren();
+  try {
+    const data = await api('/api/discovery');
+    const info = data?.lan_proxy || {};
+    const candidates = Array.isArray(info.urls) ? info.urls : [];
+    status.textContent = info.running && candidates.length ? '服务已就绪，请选择手机可访问的地址。' : '暂未发现可用的局域网地址。';
+    for (const value of candidates) {
+      try { if (!/^https?:\/\//i.test(value)) continue; } catch { continue; }
+      const row = document.createElement('div');
+      row.className = 'discovery-url';
+      row.innerHTML = `<code>${escapeHtml(value)}</code><button type="button" class="secondary-button" data-copy-url="${escapeHtml(value)}">复制</button>`;
+      urls.append(row);
+    }
+    const secure = data?.request?.secure;
+    $('discovery-hint').textContent = secure === false
+      ? '当前使用 HTTP 明文连接，仅适用于可信局域网；请勿在公共网络使用。二维码不会包含访问令牌。'
+      : (data?.hints?.vpn_bypass || '二维码不会包含访问令牌。请确认手机与电脑在同一网络。');
+  } catch (error) {
+    status.textContent = error.message || '检测失败，请确认桥接服务正在运行。';
+  }
+}
+
 async function responseJson(response) {
   let body = {};
   try { body = await response.json(); } catch { /* empty response */ }
@@ -296,6 +323,7 @@ function render(data) {
   const persisted = body.pane_statuses?.[focusedPaneId] || snapshot.pane_statuses?.[focusedPaneId];
   const liveStatus = paneStatus(focusedPane);
   const status = liveStatus !== 'unknown' ? liveStatus : paneStatus(persisted);
+  $('app-shell').dataset.status = status || 'unknown';
   const persistedName = persisted?.display_agent || persisted?.agent || persisted?.title;
   $('agent-heading').textContent = focusedPane ? paneDisplayName(focusedPane) : (persistedName || model.workspaces.find((item) => item.workspace_id === (body.focused_workspace_id || snapshot.focused_workspace_id))?.label || 'Herdr 会话');
   $('agent-detail').textContent = status === 'working' ? '智能体正在处理任务…' : status === 'blocked' ? '智能体需要你的关注' : status === 'done' ? '最近任务已完成' : '当前没有运行中的任务';
@@ -615,6 +643,9 @@ function switchView(view) {
     tab.classList.toggle('is-active', active);
     tab.setAttribute('aria-selected', String(active));
   });
+  document.querySelectorAll('.quick-action[data-view]').forEach((button) => {
+    button.classList.toggle('is-active', button.dataset.view === requested);
+  });
   document.querySelectorAll('.view').forEach((panel) => {
     const active = panel.id === `${requested}-view`;
     panel.classList.toggle('is-hidden', !active);
@@ -721,6 +752,13 @@ function applyDeepLink() {
 }
 
 $('login-form').addEventListener('submit', login);
+$('discovery-refresh')?.addEventListener('click', discoverBridge);
+$('discovery-urls')?.addEventListener('click', async (event) => {
+  const value = event.target.closest('[data-copy-url]')?.dataset.copyUrl;
+  if (!value) return;
+  try { await navigator.clipboard.writeText(value); showToast('地址已复制'); }
+  catch { showToast(`请手动复制：${value}`); }
+});
 $('reveal-token').addEventListener('click', () => {
   const input = $('token');
   const visible = input.type === 'text';
@@ -768,4 +806,5 @@ document.querySelectorAll('[data-input-key]').forEach((button) => {
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
 
 updateControlCounts();
+discoverBridge();
 boot();
