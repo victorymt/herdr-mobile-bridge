@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8787;
+export const DEFAULT_LAN_PROXY_PORT = 18787;
 export const DEFAULT_CONFIG_NAME = 'herdr-mobile-bridge';
 export const DEFAULT_HERDR_SOCKET = '/tmp/herdr.sock';
 
@@ -352,6 +353,8 @@ export async function loadConfig(options = {}) {
 
   const host = options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST;
   const port = parsePort(options.port ?? firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port, DEFAULT_PORT);
+  const lanProxyPort = parsePort(options.lanProxyPort ?? firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
+  const lanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
   const socketPath = resolve(homePath(options.socketPath || firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath, firstEnv(env, ['HOME', 'USERPROFILE']) || homedir()));
   const allowedOrigin = options.allowedOrigin || firstEnv(env, ['HERDR_BRIDGE_ALLOWED_ORIGIN', 'BRIDGE_ALLOWED_ORIGIN']) || fileConfig.allowedOrigin || '';
   const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
@@ -363,6 +366,8 @@ export async function loadConfig(options = {}) {
     ...paths,
     host,
     port,
+    lanProxyHost,
+    lanProxyPort,
     socketPath,
     token,
     secret,
@@ -424,6 +429,8 @@ export function loadConfigSync(options = {}) {
   }
   const host = options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST;
   const port = parsePort(options.port ?? firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port, DEFAULT_PORT);
+  const lanProxyPort = parsePort(options.lanProxyPort ?? firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
+  const lanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
   const home = firstEnv(env, ['HOME', 'USERPROFILE']) || homedir();
   const socketPath = resolve(homePath(options.socketPath || firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath, home));
   const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
@@ -435,6 +442,8 @@ export function loadConfigSync(options = {}) {
     ...paths,
     host,
     port,
+    lanProxyHost,
+    lanProxyPort,
     socketPath,
     token,
     secret,
