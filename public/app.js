@@ -110,7 +110,7 @@ async function discoverBridge() {
   status.textContent = '正在检测局域网地址…';
   urls.replaceChildren();
   try {
-    const data = await api('/api/discovery');
+    const data = await api('/api/discovery?qr=1');
     model.discoveryUrls = Array.isArray(data?.lan_proxy?.urls) ? data.lan_proxy.urls.filter((value) => /^https?:\/\//i.test(value)) : [];
     const info = data?.lan_proxy || {};
     const candidates = model.discoveryUrls;

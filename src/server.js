@@ -6,6 +6,7 @@ import { networkInterfaces } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { URL } from 'node:url';
+import QRCode from 'qrcode';
 
 import { AuthManager, constantTimeEqual } from './auth.js';
 import { EventBus, EventInputError } from './event-bus.js';
@@ -26,6 +27,8 @@ const MAX_SSE_PENDING = 512;
 const MAX_SSE_QUEUE = 512;
 const MAX_CONTROL_IN_FLIGHT = 32;
 const MAX_STATIC_BYTES = 2 * 1024 * 1024;
+const MAX_DISCOVERY_QR_CODES = 8;
+const MAX_DISCOVERY_QR_URL_BYTES = 512;
 const PUBLIC_DIR = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -410,6 +413,36 @@ export class BridgeServer {
   }
 
   /**
+   * Return the public connection hints and, when explicitly requested, local
+   * QR SVGs. QR generation is opt-in because the discovery endpoint is also
+   * used by health checks and should stay small by default. The encoded value
+   * is always one of the server-generated LAN URLs; no credentials or
+   * arbitrary request data can enter the image.
+   */
+  async connectionInfoWithQr(req) {
+    const info = this.connectionInfo(req);
+    const urls = Array.isArray(info.lan_proxy?.urls) ? info.lan_proxy.urls : [];
+    const qr = {};
+    for (const value of urls.slice(0, MAX_DISCOVERY_QR_CODES)) {
+      if (Buffer.byteLength(value, 'utf8') > MAX_DISCOVERY_QR_URL_BYTES) continue;
+      try {
+        const svg = await QRCode.toString(value, {
+          type: 'svg',
+          errorCorrectionLevel: 'M',
+          margin: 2,
+          width: 240,
+        });
+        // Keep the transport JSON-friendly and let the browser place the
+        // trusted SVG into an image/document without making another request.
+        qr[value] = svg;
+      } catch (error) {
+        this.logger.warn?.('failed to generate LAN discovery QR', error);
+      }
+    }
+    return { ...info, qr };
+  }
+
+  /**
    * Serialize mutations targeting the same pane. Mobile browsers can emit a
    * duplicate submit while a request is still waiting on the Herdr socket;
    * rejecting that overlap prevents accidental double prompts/keystrokes.
@@ -619,7 +652,8 @@ export class BridgeServer {
     // explain how to reach this machine. It exposes only local addresses and
     // ports—never tokens, socket paths, PIDs, or terminal data.
     if (req.method === 'GET' && pathname === '/api/discovery') {
-      writeJson(res, 200, this.connectionInfo(req));
+      const includeQr = url.searchParams.get('qr') === '1' || url.searchParams.get('include_qr') === '1';
+      writeJson(res, 200, includeQr ? await this.connectionInfoWithQr(req) : this.connectionInfo(req));
       return;
     }
 

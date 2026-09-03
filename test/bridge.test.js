@@ -138,6 +138,13 @@ test('health is public and protected routes reject missing auth', async () => {
     urls: ['http://192.168.1.20:18787'],
   });
   assert.match(discoveryBody.hints.manual_forward, /^socat TCP-LISTEN:18787,bind=<LAN_IP>,reuseaddr,fork TCP:127\.0\.0\.1:\d+$/);
+  const discoveryQr = await request('/api/discovery?qr=1', { auth: false });
+  assert.equal(discoveryQr.status, 200);
+  const qrBody = await discoveryQr.json();
+  const qrSvg = qrBody.qr?.['http://192.168.1.20:18787'];
+  assert.match(qrSvg, /^<svg\b/);
+  assert.match(qrSvg, /shape-rendering="crispEdges"/);
+  assert.doesNotMatch(qrSvg, /owner-token|token|secret/i);
 });
 
 test('state, output and focus routes use only the injected Herdr client', async () => {
