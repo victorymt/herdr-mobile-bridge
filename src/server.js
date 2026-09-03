@@ -20,6 +20,7 @@ import { StateStore } from './state-store.js';
 import { PushManager } from './push.js';
 
 const MAX_SSE_CLIENTS = 128;
+const MAX_SSE_PENDING = 512;
 const MAX_STATIC_BYTES = 2 * 1024 * 1024;
 const PUBLIC_DIR = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const MIME_TYPES = Object.freeze({
@@ -661,6 +662,10 @@ export class BridgeServer {
 
   allowLoginAttempt(req) {
     const now = Date.now();
+    // Bound this map even when an attacker rotates source addresses.
+    for (const [address, value] of this.loginAttempts) {
+      if (value.resetAt <= now) this.loginAttempts.delete(address);
+    }
     const key = String(req.socket?.remoteAddress || 'unknown');
     const entry = this.loginAttempts.get(key) || { count: 0, resetAt: now + 60_000 };
     if (entry.resetAt <= now) { entry.count = 0; entry.resetAt = now + 60_000; }
@@ -856,7 +861,10 @@ export class BridgeServer {
     // a reconnect from observing live output before older replayed frames or
     // missing an event in the snapshot/subscribe gap.
     const onEvent = (event) => {
-      if (replaying) pending.push(event);
+      if (replaying) {
+        pending.push(event);
+        if (pending.length > MAX_SSE_PENDING) pending.splice(0, pending.length - MAX_SSE_PENDING);
+      }
       else write(event);
     };
     unsubscribe = this.eventBus.subscribe(onEvent);
