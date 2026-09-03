@@ -151,6 +151,7 @@ export class EventBus {
     this.maxReplay = options.maxReplay || 256;
     this.events = [];
     this.nextSeq = 1;
+    this.generation = options.generation || randomUUID();
     this.emitter = new EventEmitter();
     this.socketPath = options.socketPath;
     this.onSocketPath = options.onSocketPath;
@@ -185,11 +186,12 @@ export class EventBus {
     return this.events.filter((event) => Number(event.seq) > numeric);
   }
 
-  replaySince(lastEventId) {
+  replaySince(lastEventId, generation) {
+    if (generation && generation !== this.generation) return { events: [...this.events], gap: true, generation: this.generation };
     const numeric = Number(lastEventId);
     if (!Number.isFinite(numeric) || this.events.length === 0) return { events: this.getSince(lastEventId), gap: false };
     const oldest = Number(this.events[0]?.seq);
-    return { events: this.getSince(lastEventId), gap: Number.isFinite(oldest) && numeric < oldest - 1, oldest };
+    return { events: this.getSince(lastEventId), gap: Number.isFinite(oldest) && numeric < oldest - 1, oldest, generation: this.generation };
   }
 
   latest() {

@@ -934,6 +934,7 @@ export class BridgeServer {
       'cache-control': 'no-cache, no-store, must-revalidate',
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
+      'x-herdr-event-generation': this.eventBus.generation || '',
     });
     let closed = false;
     let heartbeat;
@@ -1042,7 +1043,8 @@ export class BridgeServer {
       req.on('close', cleanup);
       req.on('aborted', cleanup);
     }
-    const replayInfo = this.eventBus.replaySince ? this.eventBus.replaySince(lastId) : { events: this.eventBus.getSince(lastId), gap: false };
+    const generation = req.headers?.['x-herdr-event-generation'] || url.searchParams.get('generation');
+    const replayInfo = this.eventBus.replaySince ? this.eventBus.replaySince(lastId, generation) : { events: this.eventBus.getSince(lastId), gap: false };
     const replay = replayInfo.events;
     if (replayInfo.gap) write({ event: 'resync_required', context: { reason: 'replay_gap' }, received_at: new Date().toISOString() });
     const replayed = new Set(replay);
