@@ -564,7 +564,13 @@ export class BridgeServer {
       return;
     }
 
-    const authResult = this.auth.authenticate(req, url, { allowQuery: pathname === '/api/stream' });
+    // EventSource cannot set arbitrary headers, but accepting a long-lived
+    // owner/session token in the URL leaks it to browser history, proxy logs,
+    // and referrers. Query credentials are therefore opt-in for a narrowly
+    // controlled short-lived deployment; normal LAN use relies on cookies.
+    const authResult = this.auth.authenticate(req, url, {
+      allowQuery: pathname === '/api/stream' && this.config.allowSseQueryToken === true,
+    });
     if (!authResult.ok) {
       writeError(res, 401, 'unauthorized', 'authentication required');
       return;

@@ -121,6 +121,8 @@ test('health is public and protected routes reject missing auth', async () => {
   assert.equal((await health.json()).ok, true);
   const state = await request('/api/state', { auth: false });
   assert.equal(state.status, 401);
+  const queryToken = await request('/api/stream?token=owner-token', { auth: false });
+  assert.equal(queryToken.status, 401, 'long-lived credentials must not authenticate through an SSE URL by default');
 });
 
 test('state, output and focus routes use only the injected Herdr client', async () => {
