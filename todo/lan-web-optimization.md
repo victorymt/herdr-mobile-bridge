@@ -165,7 +165,7 @@ Herdr Unix socket
 
 - [x] `npm run check`：通过。
 - [x] `npm audit --omit=dev`：0 vulnerabilities。
-- [x] `npm test`：默认并行 runner 已通过 74/74（2026-09-03，含 LAN 配置/发现、失败清理、推送 SSRF/超时和 Web/PWA 回归）。
+- [x] `npm test`：默认并行 runner 已通过 75/75（2026-09-03，含 LAN 配置/发现、失败清理、推送 SSRF/超时和 Web/PWA 回归）。
 - [x] 已修复 `test/config-launcher.test.js` 的固定 PID `1234` 冲突：测试注入 `processInspector`，没有放宽生产身份校验。
 
 ### 功能验收
@@ -242,6 +242,6 @@ node src/launcher.js stop
 
 ### 实现提交记录
 
-- 实现提交 hash：`94293d5`（LAN 生命周期、配置与推送安全）和 `eb5ebe0`
-  （桌面/手机 Web、PWA 与视觉回归）；文档提交另行记录。两个提交均明确排除
+- 实现提交 hash：`94293d5`（LAN 生命周期、配置与推送安全）、`1880fc3`
+  （推送策略别名兼容）和 `eb5ebe0`（桌面/手机 Web、PWA 与视觉回归）；文档提交另行记录。三个提交均明确排除
   用户已有的 `public/icon.svg` 修改。
