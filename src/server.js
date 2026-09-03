@@ -857,7 +857,9 @@ export class BridgeServer {
     unsubscribe = this.eventBus.subscribe(onEvent);
     client = { res, cleanup };
     this.sseClients.add(client);
-    const replay = this.eventBus.getSince(lastId);
+    const replayInfo = this.eventBus.replaySince ? this.eventBus.replaySince(lastId) : { events: this.eventBus.getSince(lastId), gap: false };
+    const replay = replayInfo.events;
+    if (replayInfo.gap) write({ event: 'resync_required', context: { reason: 'replay_gap' }, received_at: new Date().toISOString() });
     const replayed = new Set(replay);
     for (const event of replay) write(event);
     replaying = false;

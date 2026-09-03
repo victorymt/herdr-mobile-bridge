@@ -185,6 +185,13 @@ export class EventBus {
     return this.events.filter((event) => Number(event.seq) > numeric);
   }
 
+  replaySince(lastEventId) {
+    const numeric = Number(lastEventId);
+    if (!Number.isFinite(numeric) || this.events.length === 0) return { events: this.getSince(lastEventId), gap: false };
+    const oldest = Number(this.events[0]?.seq);
+    return { events: this.getSince(lastEventId), gap: Number.isFinite(oldest) && numeric < oldest - 1, oldest };
+  }
+
   latest() {
     return this.events.at(-1);
   }

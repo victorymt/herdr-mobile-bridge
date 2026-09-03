@@ -161,11 +161,12 @@ export async function sendEvent(payload, options = {}) {
   const endpoint = options.endpoint || endpointFromEnv(env);
   const bounded = boundPayload(payload);
   const url = validateEventEndpoint(endpoint, env, options);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 1500);
   const attempts = Math.max(1, Math.min(3, Number(options.retries ?? 2) + 1));
   let lastError;
-  for (let attempt = 0; attempt < attempts; attempt += 1) try {
+  for (let attempt = 0; attempt < attempts; attempt += 1) { let timeout;
+    try {
+    const controller = new AbortController();
+    timeout = setTimeout(() => controller.abort(), options.timeoutMs || 1500);
     const response = await (options.fetch || globalThis.fetch)(url, {
       method: 'POST',
       headers: {
@@ -181,10 +182,11 @@ export async function sendEvent(payload, options = {}) {
     });
     if (!response.ok) throw new Error(`bridge returned HTTP ${response.status}`);
     return { delivered: true, status: response.status, attempts: attempt + 1 };
-  } catch (error) {
+    } catch (error) {
     lastError = error;
     if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, Math.min(250 * (2 ** attempt), 1000)));
-  } finally { clearTimeout(timeout); }
+    } finally { clearTimeout(timeout); }
+  }
   throw lastError;
 }
 
