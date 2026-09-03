@@ -89,6 +89,10 @@ before(async () => {
     },
     store,
     herdrClient: fakeClient,
+    networkInterfaces: () => ({
+      lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+      wlan0: [{ address: '192.168.1.20', family: 'IPv4', internal: false }],
+    }),
     pushSender: async (subscription, payload) => {
       pushes.push({ subscription, payload });
       return { status: 201 };
@@ -123,6 +127,17 @@ test('health is public and protected routes reject missing auth', async () => {
   assert.equal(state.status, 401);
   const queryToken = await request('/api/stream?token=owner-token', { auth: false });
   assert.equal(queryToken.status, 401, 'long-lived credentials must not authenticate through an SSE URL by default');
+  const discovery = await request('/api/discovery', { auth: false });
+  assert.equal(discovery.status, 200);
+  const discoveryBody = await discovery.json();
+  assert.deepEqual(discoveryBody.lan_proxy, {
+    enabled: false,
+    host: null,
+    port: null,
+    running: false,
+    urls: ['http://192.168.1.20:18787'],
+  });
+  assert.match(discoveryBody.hints.manual_forward, /^socat TCP-LISTEN:18787,bind=<LAN_IP>,reuseaddr,fork TCP:127\.0\.0\.1:\d+$/);
 });
 
 test('state, output and focus routes use only the injected Herdr client', async () => {

@@ -2,6 +2,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
+import { networkInterfaces } from 'node:os';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { URL } from 'node:url';
@@ -18,6 +19,7 @@ import {
 } from './herdr-client.js';
 import { StateStore } from './state-store.js';
 import { PushManager } from './push.js';
+import { DEFAULT_LAN_PROXY_PORT } from './config.js';
 
 const MAX_SSE_CLIENTS = 128;
 const MAX_SSE_PENDING = 512;
@@ -102,6 +104,43 @@ function originAllowed(configOrigin, requestOrigin, requestHost) {
 function isLoopback(req) {
   const address = req.socket?.remoteAddress || '';
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+function isPrivateLanAddress(address, family) {
+  const value = String(address || '').toLowerCase();
+  if (family === 'IPv4' || family === 4) {
+    const octets = value.split('.').map((part) => Number(part));
+    if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+    const [first, second] = octets;
+    return first === 10
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || (first === 100 && second >= 64 && second <= 127);
+  }
+  // ULA and link-local IPv6 addresses are reachable only on local networks.
+  return value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80:');
+}
+
+function collectLanAddresses(config = {}, interfaces = networkInterfaces()) {
+  const values = [];
+  const configured = String(config.lanProxyHost || '').trim();
+  if (configured && configured !== '0.0.0.0' && configured !== '::') values.push(configured);
+  for (const entries of Object.values(interfaces || {})) {
+    for (const item of entries || []) {
+      if (!item || item.internal || !isPrivateLanAddress(item.address, item.family)) continue;
+      values.push(String(item.address));
+    }
+  }
+  return [...new Set(values)];
+}
+
+function authorityHost(host) {
+  const value = String(host || '').trim();
+  return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value;
+}
+
+function lanUrl(host, port, protocol = 'http') {
+  return `${protocol}://${authorityHost(host)}:${Number(port)}`;
 }
 
 function cleanText(value, max = 200) {
@@ -276,6 +315,7 @@ export class BridgeServer {
     this.publicDir = resolve(options.publicDir || this.config.publicDir || PUBLIC_DIR);
     this.logger = options.logger || console;
     this.herdrClient = options.herdrClient;
+    this.networkInterfaces = options.networkInterfaces || networkInterfaces;
     this.store = options.store || new StateStore({
       stateDir: this.config.stateDir,
       subscriptionsPath: this.config.subscriptionsPath,
@@ -336,6 +376,37 @@ export class BridgeServer {
   invalidateStateCache() {
     this.stateCache = null;
     this.stateCacheAt = 0;
+  }
+
+  connectionInfo(req) {
+    const address = this.address();
+    const lanHost = this.config.lanProxyHost || null;
+    const lanPort = Number(this.config.lanProxyPort || DEFAULT_LAN_PROXY_PORT);
+    let interfaces = {};
+    try { interfaces = this.networkInterfaces?.() || {}; } catch { interfaces = {}; }
+    const hosts = collectLanAddresses(this.config, interfaces);
+    const urls = hosts.map((host) => lanUrl(host, lanPort));
+    const configuredUrl = lanHost ? lanUrl(lanHost, lanPort) : null;
+    if (configuredUrl && !urls.includes(configuredUrl)) urls.unshift(configuredUrl);
+    const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    const secure = Boolean(req?.socket?.encrypted) || (forwardedProto === 'https' && this.requestOriginAllowed(req));
+    return {
+      ok: true,
+      service: 'herdr-mobile-bridge',
+      bridge: { host: address.host, port: address.port, loopback: address.host === '127.0.0.1' || address.host === '::1' },
+      lan_proxy: {
+        enabled: Boolean(lanHost),
+        host: lanHost,
+        port: lanHost ? lanPort : null,
+        running: Boolean(this.lanProxy?.server),
+        urls,
+      },
+      request: { secure },
+      hints: {
+        manual_forward: `socat TCP-LISTEN:${lanPort},bind=<LAN_IP>,reuseaddr,fork TCP:127.0.0.1:${address.port}`,
+        vpn_bypass: '如果手机 VPN 阻断私网访问，请开启“允许局域网 / Allow LAN traffic / Bypass private networks”。',
+      },
+    };
   }
 
   /**
@@ -541,6 +612,14 @@ export class BridgeServer {
         Object.assign(health, { version: this.config.version || '0.1.0', uptime_seconds: Math.floor(process.uptime()), pid: process.pid, host: this.address().host, port: this.address().port, socket_present: Boolean(this.config.socketPath && existsSync(this.config.socketPath)), started_at: runtime.started_at || this.startedAt?.toISOString() || null });
       }
       writeJson(res, 200, health);
+      return;
+    }
+
+    // Discovery is intentionally unauthenticated so the login screen can
+    // explain how to reach this machine. It exposes only local addresses and
+    // ports—never tokens, socket paths, PIDs, or terminal data.
+    if (req.method === 'GET' && pathname === '/api/discovery') {
+      writeJson(res, 200, this.connectionInfo(req));
       return;
     }
 
