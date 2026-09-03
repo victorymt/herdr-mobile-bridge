@@ -43,7 +43,20 @@ export class LanProxy {
       this.server.once('listening', ready);
       this.server.listen(this.port, this.host);
     });
+    await this.healthCheck();
     return this.address();
+  }
+
+  healthCheck(timeoutMs = 1500) {
+    return new Promise((resolve, reject) => {
+      const socket = this.net.createConnection({ host: this.host, port: this.port });
+      let data = '';
+      const timer = setTimeout(() => { socket.destroy(); reject(new Error('LAN proxy health check timed out')); }, timeoutMs);
+      const done = (error) => { clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(true); };
+      socket.on('data', (chunk) => { data += chunk.toString(); if (/^HTTP\/1\.[01] 200\b/m.test(data)) done(); });
+      socket.once('error', done);
+      socket.once('connect', () => socket.write('GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'));
+    });
   }
 
   address() {

@@ -30,7 +30,7 @@ export async function startBridge(options = {}) {
   if (server.config.lanProxyHost) {
     const proxy = new LanProxy({ host: server.config.lanProxyHost, port: server.config.lanProxyPort, targetPort: server.address().port });
     try {
-      await proxy.start();
+    try { await proxy.start(); } catch (error) { await server.close(); throw new Error(`LAN proxy health check failed: ${error.message}`); }
     } catch (error) {
       await server.close();
       throw error;
