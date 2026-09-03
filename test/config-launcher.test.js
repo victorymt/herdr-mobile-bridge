@@ -27,10 +27,14 @@ test('launcher does not spawn when runtime PID is alive and acquires a lock for 
   });
   let spawned = 0;
   const processApi = { kill(pid, signal) { if (pid === 1234 && signal === 0) return true; const error = new Error('dead'); error.code = 'ESRCH'; throw error; } };
-  const alive = ensureBridge({ config, processApi, spawn() { spawned += 1; return { pid: 1234, unref() {} }; } });
+  // The fake process API deliberately reports the PID as alive. Disable the
+  // optional /proc identity probe so this test remains deterministic when the
+  // host happens to have a real process with PID 1234.
+  const processInspector = () => undefined;
+  const alive = ensureBridge({ config, processApi, processInspector, spawn() { spawned += 1; return { pid: 1234, unref() {} }; } });
   assert.equal(alive.started, true);
   assert.equal(spawned, 1);
-  const second = ensureBridge({ config, processApi, spawn() { spawned += 1; return { pid: 1234, unref() {} }; } });
+  const second = ensureBridge({ config, processApi, processInspector, spawn() { spawned += 1; return { pid: 1234, unref() {} }; } });
   assert.equal(second.started, false);
   assert.equal(spawned, 1);
   assert.equal(processAlive(0, processApi), false);

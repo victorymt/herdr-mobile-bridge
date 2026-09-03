@@ -21,6 +21,8 @@ import { PushManager } from './push.js';
 
 const MAX_SSE_CLIENTS = 128;
 const MAX_SSE_PENDING = 512;
+const MAX_SSE_QUEUE = 512;
+const MAX_CONTROL_IN_FLIGHT = 32;
 const MAX_STATIC_BYTES = 2 * 1024 * 1024;
 const PUBLIC_DIR = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const MIME_TYPES = Object.freeze({
@@ -308,6 +310,7 @@ export class BridgeServer {
     this.stateCache = null;
     this.stateCacheAt = 0;
     this.loginAttempts = new Map();
+    this.controlInFlight = new Map();
     this.unsubscribeStateInvalidation = this.eventBus.subscribe(() => {
       this.stateCache = null;
       this.stateCacheAt = 0;
@@ -333,6 +336,38 @@ export class BridgeServer {
   invalidateStateCache() {
     this.stateCache = null;
     this.stateCacheAt = 0;
+  }
+
+  /**
+   * Serialize mutations targeting the same pane. Mobile browsers can emit a
+   * duplicate submit while a request is still waiting on the Herdr socket;
+   * rejecting that overlap prevents accidental double prompts/keystrokes.
+   */
+  async withControlGuard(paneId, operation) {
+    const key = String(paneId || '').trim();
+    if (!key) return operation();
+    const existing = this.controlInFlight.get(key);
+    if (existing) {
+      const error = new Error('a control request for this pane is already in progress');
+      error.code = 'control_in_flight';
+      error.status = 429;
+      error.retryAfter = 1;
+      throw error;
+    }
+    if (this.controlInFlight.size >= MAX_CONTROL_IN_FLIGHT) {
+      const error = new Error('too many control requests in progress');
+      error.code = 'control_capacity';
+      error.status = 429;
+      error.retryAfter = 2;
+      throw error;
+    }
+    const task = Promise.resolve().then(operation);
+    this.controlInFlight.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (this.controlInFlight.get(key) === task) this.controlInFlight.delete(key);
+    }
   }
 
   async start() {
@@ -715,7 +750,7 @@ export class BridgeServer {
     }
     const paneId = idFromBody(body, ['pane_id', 'paneId', 'id']);
     if (!paneId) return writeError(res, 400, 'invalid_pane_id', 'pane_id is required');
-    const result = await this.herdrClient.focusPane(paneId);
+    await this.withControlGuard(paneId, () => this.herdrClient.focusPane(paneId));
     // Focusing changes the authoritative session snapshot. Do not let the
     // short read-state cache make the UI appear to have ignored a successful
     // focus action.
@@ -732,7 +767,7 @@ export class BridgeServer {
     }
     const workspaceId = idFromBody(body, ['workspace_id', 'workspaceId', 'id']);
     if (!workspaceId) return writeError(res, 400, 'invalid_workspace_id', 'workspace_id is required');
-    const result = await this.herdrClient.focusWorkspace(workspaceId);
+    await this.withControlGuard(`workspace:${workspaceId}`, () => this.herdrClient.focusWorkspace(workspaceId));
     this.invalidateStateCache();
     writeJson(res, 200, { ok: true, workspace_id: workspaceId, accepted: true });
   }
@@ -749,7 +784,7 @@ export class BridgeServer {
     const text = assertPromptText(body.text);
     // Do not return the raw agent response: it can contain cwd/session
     // metadata that is intentionally omitted from the mobile snapshot.
-    await this.herdrClient.promptAgent(paneId, text);
+    await this.withControlGuard(paneId, () => this.herdrClient.promptAgent(paneId, text));
     this.invalidateStateCache();
     writeJson(res, 202, { ok: true, accepted: true, pane_id: paneId });
   }
@@ -766,10 +801,10 @@ export class BridgeServer {
     const text = assertInputText(body.text ?? '');
     const keys = normaliseInputKeys(body.keys ?? []);
     if (!text && keys.length === 0) throw new TypeError('pane input requires text or at least one key');
-    await this.herdrClient.sendPaneInput(paneId, {
+    await this.withControlGuard(paneId, () => this.herdrClient.sendPaneInput(paneId, {
       text,
       keys,
-    });
+    }));
     this.invalidateStateCache();
     writeJson(res, 202, { ok: true, accepted: true, pane_id: paneId });
   }
@@ -815,26 +850,79 @@ export class BridgeServer {
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     });
-    res.write('retry: 3000\n\n');
     let closed = false;
     let heartbeat;
     let unsubscribe = () => {};
     let client;
     let replaying = true;
+    let backpressured = false;
+    let drainListener;
     const pending = [];
-    const write = (event) => {
-      if (!res.writableEnded) {
+    let replayOverflow = false;
+    const queue = [];
+    const removeDrainListener = () => {
+      if (!drainListener || typeof res.off !== 'function') return;
+      res.off('drain', drainListener);
+      drainListener = undefined;
+    };
+    const flush = () => {
+      if (closed || res.writableEnded || backpressured) return;
+      removeDrainListener();
+      while (queue.length && !closed && !res.writableEnded) {
+        const frame = queue.shift();
         try {
-          res.write(sseFrame(sanitiseEvent(event)));
+          const writable = res.write(frame);
+          if (writable === false) {
+            backpressured = true;
+            drainListener = () => {
+              backpressured = false;
+              drainListener = undefined;
+              flush();
+            };
+            if (typeof res.once === 'function') res.once('drain', drainListener);
+            return;
+          }
         } catch {
           cleanup();
+          return;
         }
       }
     };
+    const enqueue = (frame) => {
+      if (closed || res.writableEnded) return;
+      if (backpressured || queue.length) {
+        if (queue.length >= MAX_SSE_QUEUE) {
+          // A client that cannot drain is no longer safe to keep around. It
+          // will reconnect with Last-Event-ID and receive a full resync.
+          cleanup();
+          return;
+        }
+        queue.push(frame);
+        return;
+      }
+      try {
+        const writable = res.write(frame);
+        if (writable === false) {
+          backpressured = true;
+          drainListener = () => {
+            backpressured = false;
+            drainListener = undefined;
+            flush();
+          };
+          if (typeof res.once === 'function') res.once('drain', drainListener);
+        }
+      } catch {
+        cleanup();
+      }
+    };
+    const write = (event) => enqueue(sseFrame(sanitiseEvent(event)));
     const cleanup = () => {
       if (closed) return;
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
+      removeDrainListener();
+      queue.length = 0;
+      pending.length = 0;
       unsubscribe();
       if (client) this.sseClients.delete(client);
       try {
@@ -843,6 +931,9 @@ export class BridgeServer {
         // Ignore a socket already closed by the peer.
       }
     };
+    // Send the retry hint through the same bounded writer as event frames so
+    // a saturated socket cannot bypass backpressure accounting.
+    enqueue('retry: 3000\n\n');
     // Subscribe before taking the replay snapshot. Events emitted while the
     // snapshot is being written are queued and flushed afterward, preventing
     // a reconnect from observing live output before older replayed frames or
@@ -850,13 +941,22 @@ export class BridgeServer {
     const onEvent = (event) => {
       if (replaying) {
         pending.push(event);
-        if (pending.length > MAX_SSE_PENDING) pending.splice(0, pending.length - MAX_SSE_PENDING);
+        if (pending.length > MAX_SSE_PENDING) {
+          replayOverflow = true;
+          pending.splice(0, pending.length - MAX_SSE_PENDING);
+        }
       }
       else write(event);
     };
     unsubscribe = this.eventBus.subscribe(onEvent);
     client = { res, cleanup };
     this.sseClients.add(client);
+    // Register close handlers before replay so a client that disappears while
+    // a large history is being serialized is removed immediately.
+    if (typeof req.on === 'function') {
+      req.on('close', cleanup);
+      req.on('aborted', cleanup);
+    }
     const replayInfo = this.eventBus.replaySince ? this.eventBus.replaySince(lastId) : { events: this.eventBus.getSince(lastId), gap: false };
     const replay = replayInfo.events;
     if (replayInfo.gap) write({ event: 'resync_required', context: { reason: 'replay_gap' }, received_at: new Date().toISOString() });
@@ -880,6 +980,10 @@ export class BridgeServer {
       // replay snapshot, in which case the same object is already replayed.
       if (!replayed.has(event)) write(event);
     }
+    if (replayOverflow) {
+      write({ event: 'resync_required', context: { reason: 'replay_overflow' }, received_at: new Date().toISOString() });
+    }
+    flush();
     if (closed) return;
     // A readiness marker must not carry an SSE id: assigning seq=0 here would
     // reset the browser's Last-Event-ID after replay and cause every reconnect
@@ -887,14 +991,8 @@ export class BridgeServer {
     write({ id: `ready-${randomUUID()}`, event: 'ready', context: { connected: true }, received_at: new Date().toISOString() });
     heartbeat = setInterval(() => {
       if (closed || res.writableEnded) return cleanup();
-      try {
-        res.write(`: heartbeat ${Date.now()}\n\n`);
-      } catch {
-        cleanup();
-      }
+      enqueue(`: heartbeat ${Date.now()}\n\n`);
     }, 15_000);
-    req.on('close', cleanup);
-    req.on('aborted', cleanup);
   }
 
   methodNotAllowed(res, methods) {
@@ -907,6 +1005,7 @@ export class BridgeServer {
     const status = error?.code === 'body_too_large' ? 413 : statusForError(error);
     const code = error?.code || (status === 500 ? 'internal_error' : 'request_failed');
     const message = status >= 500 ? (status === 502 ? 'Herdr session unavailable' : 'internal server error') : (error?.message || 'request failed');
+    if (error?.retryAfter) res.setHeader('retry-after', String(error.retryAfter));
     if (status >= 500) this.logger.error?.(error);
     writeError(res, status, code, message);
   }

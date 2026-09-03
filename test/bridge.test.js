@@ -239,6 +239,39 @@ test('control routes submit prompts and pane input without exposing raw Herdr re
   ]);
 });
 
+test('control mutations reject overlapping requests for the same pane', async () => {
+  const originalPrompt = fakeClient.promptAgent;
+  let release;
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  fakeClient.promptAgent = async (...args) => {
+    started();
+    await gate;
+    return originalPrompt.apply(fakeClient, args);
+  };
+  try {
+    const firstPromise = request('/api/control/prompt', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pane_id: 'w1:p1', text: 'first request' }),
+    });
+    await startedPromise;
+    const second = await request('/api/control/input', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pane_id: 'w1:p1', text: 'duplicate request' }),
+    });
+    assert.equal(second.status, 429);
+    const secondBody = await second.json();
+    assert.equal(secondBody.error.code, 'control_in_flight');
+    release();
+    const first = await firstPromise;
+    assert.equal(first.status, 202);
+  } finally {
+    release?.();
+    fakeClient.promptAgent = originalPrompt;
+  }
+});
+
 test('control routes reject malformed input and retain CSRF protection', async () => {
   const noCsrf = await fetch(`${base}/api/control/prompt`, {
     method: 'POST',

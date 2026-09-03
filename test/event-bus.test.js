@@ -255,3 +255,62 @@ test('stream replay queues events published during the replay snapshot', async (
     requestListeners.close?.();
   }
 });
+
+test('SSE writer waits for drain and bounds a stalled client queue', async () => {
+  const server = new BridgeServer({ config: {}, herdrClient: {} });
+  let listener;
+  const eventBus = {
+    subscribe(callback) { listener = callback; return () => { listener = undefined; }; },
+    getSince() { return []; },
+    replaySince() { return { events: [], gap: false }; },
+  };
+  server.eventBus = eventBus;
+  const requestListeners = {};
+  let firstWrite = true;
+  let drain;
+  const response = {
+    writableEnded: false,
+    chunks: [],
+    writeHead() {},
+    write(chunk) {
+      this.chunks.push(String(chunk));
+      if (firstWrite) { firstWrite = false; return false; }
+      return true;
+    },
+    once(name, callback) { if (name === 'drain') drain = callback; },
+    off() {},
+    end() { this.writableEnded = true; },
+  };
+  const request = {
+    headers: {},
+    on(name, callback) { requestListeners[name] = callback; },
+  };
+  await server.handleStream(request, response, new URL('http://127.0.0.1/api/stream'));
+  // The retry frame filled the socket. Replay/ready frames must wait until
+  // the transport emits drain rather than being written into a saturated
+  // response immediately.
+  assert.equal(response.chunks.length, 1);
+  assert.equal(typeof drain, 'function');
+  drain();
+  assert.ok(response.chunks.some((chunk) => chunk.includes('event: ready')));
+
+  // A client that never drains is removed once its bounded queue is full.
+  firstWrite = true;
+  drain = undefined;
+  const request2Listeners = {};
+  const response2 = {
+    writableEnded: false,
+    chunks: [],
+    writeHead() {},
+    write() { firstWrite = false; return false; },
+    once(name, callback) { if (name === 'drain') drain = callback; },
+    off() {},
+    end() { this.writableEnded = true; },
+  };
+  const request2 = { headers: {}, on(name, callback) { request2Listeners[name] = callback; } };
+  await server.handleStream(request2, response2, new URL('http://127.0.0.1/api/stream'));
+  for (let index = 0; index < 600; index += 1) listener?.({ seq: index + 1, event: 'pane_updated', context: { pane_id: 'p1' } });
+  assert.equal(response2.writableEnded, true);
+  requestListeners.close?.();
+  request2Listeners.close?.();
+});
