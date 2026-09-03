@@ -87,6 +87,20 @@ For this HTTP-only path, leave `cookieSecure` unset or set it to `false`. If
 `allowedOrigin` is configured explicitly, include the exact LAN origin (for
 example `http://192.168.1.20`) or remove the override for same-host access.
 
+The launcher can manage the built-in LAN proxy without a separate `socat`
+process. It forwards a LAN listener to the loopback gateway, and the gateway
+performs the proxy health check and lifecycle cleanup:
+
+```bash
+node src/launcher.js ensure --lan-host 192.168.1.20 --lan-port 18787
+node src/launcher.js status
+node src/launcher.js stop
+```
+
+Use the resulting `http://192.168.1.20:18787` URL on the phone. The proxy is
+opt-in, should be bound to a trusted LAN interface, and does not provide HTTPS;
+use a local HTTPS reverse proxy when Web Push is required.
+
 Open the URL for the path you chose—your HTTPS proxy URL for notifications, or
 the LAN URL for controls only—not `http://127.0.0.1:8787`. On the first visit,
 enter the token printed by `node src/launcher.js token`. The dashboard then

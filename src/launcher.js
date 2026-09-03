@@ -182,6 +182,13 @@ export function ensureBridge(options = {}) {
       HERDR_LAN_PROXY_HOST: config.lanProxyHost,
       HERDR_LAN_PROXY_PORT: config.lanProxyHost ? String(config.lanProxyPort) : undefined,
     };
+    // Do not let a stale inherited alias unexpectedly enable the optional LAN
+    // listener when the resolved configuration has it disabled. The child
+    // receives one authoritative value for each setting.
+    for (const key of [
+      'HERDR_LAN_PROXY_HOST', 'HERDR_LAN_PROXY_PORT',
+      'BRIDGE_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_PORT',
+    ]) delete childEnv[key];
     for (const [key, value] of Object.entries(resolvedEnv)) {
       if (typeof value === 'string' && value.trim()) childEnv[key] = value;
     }
@@ -284,7 +291,7 @@ function parseArgs(argv) {
 export function main(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv);
   if (parsed.options.help || !['ensure', 'setup', 'status', 'token', 'stop'].includes(parsed.command)) {
-    process.stdout.write('Usage: node src/launcher.js <ensure|setup|status|token|stop> [--json]\n');
+    process.stdout.write('Usage: node src/launcher.js <ensure|setup|status|token|stop> [--host HOST] [--port PORT] [--lan-host HOST --lan-port PORT] [--config-dir DIR] [--state-dir DIR] [--json]\n');
     return null;
   }
   const { command, options } = parsed;
