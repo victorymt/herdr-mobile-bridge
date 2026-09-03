@@ -457,6 +457,10 @@ body::before {
 .discovery-url { display:flex; align-items:center; gap:8px; min-width:0; }
 .discovery-url code { flex:1; min-width:0; overflow-wrap:anywhere; color:var(--accent); font-size:11px; }
 .discovery-url .secondary-button { flex:none; min-height:36px; padding:7px 10px; }
+.discovery-actions { display:flex; align-items:center; gap:9px; margin-top:10px; }
+.discovery-actions button { min-height:38px; }
+.discovery-test-status { color:var(--muted); font-size:11px; }
+.qr-fallback { flex:none; color:var(--faint); font-size:10px; }
 
 #app-shell[data-status="working"] .hero-card { border-color: rgba(169, 242, 201, .52); }
 #app-shell[data-status="blocked"] .hero-card { border-color: rgba(245, 198, 116, .52); }

@@ -20,6 +20,7 @@ const model = {
   stream: null,
   retryTimer: null,
   toastTimer: null,
+  discoveryUrls: [],
 };
 
 const STATUS_LABELS = {
@@ -110,14 +111,15 @@ async function discoverBridge() {
   urls.replaceChildren();
   try {
     const data = await api('/api/discovery');
+    model.discoveryUrls = Array.isArray(data?.lan_proxy?.urls) ? data.lan_proxy.urls.filter((value) => /^https?:\/\//i.test(value)) : [];
     const info = data?.lan_proxy || {};
-    const candidates = Array.isArray(info.urls) ? info.urls : [];
+    const candidates = model.discoveryUrls;
     status.textContent = info.running && candidates.length ? '服务已就绪，请选择手机可访问的地址。' : '暂未发现可用的局域网地址。';
     for (const value of candidates) {
       try { if (!/^https?:\/\//i.test(value)) continue; } catch { continue; }
       const row = document.createElement('div');
       row.className = 'discovery-url';
-      row.innerHTML = `<code>${escapeHtml(value)}</code><button type="button" class="secondary-button" data-copy-url="${escapeHtml(value)}">复制</button>`;
+      row.innerHTML = `<code>${escapeHtml(value)}</code><button type="button" class="secondary-button" data-copy-url="${escapeHtml(value)}">复制</button><span class="qr-fallback" aria-label="二维码不可用，请复制地址">请复制</span>`;
       urls.append(row);
     }
     const secure = data?.request?.secure;
@@ -127,6 +129,22 @@ async function discoverBridge() {
   } catch (error) {
     status.textContent = error.message || '检测失败，请确认桥接服务正在运行。';
   }
+}
+
+async function testDiscovery() {
+  const node = $('discovery-test-status');
+  const button = $('discovery-test');
+  const target = model.discoveryUrls?.[0];
+  if (!target) { node.textContent = '暂无可测试地址'; return; }
+  button.disabled = true; node.textContent = '测试中…';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(`${target.replace(/\/$/, '')}/api/discovery`, { signal: controller.signal, credentials: 'omit', cache: 'no-store' });
+    node.textContent = response.ok ? '连接成功' : `服务拒绝（${response.status}）`;
+  } catch (error) {
+    node.textContent = error.name === 'AbortError' ? '连接超时，请检查局域网或防火墙' : '无法连接，可能被 VPN/网络策略拦截';
+  } finally { clearTimeout(timer); button.disabled = false; }
 }
 
 async function responseJson(response) {
@@ -753,6 +771,7 @@ function applyDeepLink() {
 
 $('login-form').addEventListener('submit', login);
 $('discovery-refresh')?.addEventListener('click', discoverBridge);
+$('discovery-test')?.addEventListener('click', testDiscovery);
 $('discovery-urls')?.addEventListener('click', async (event) => {
   const value = event.target.closest('[data-copy-url]')?.dataset.copyUrl;
   if (!value) return;
