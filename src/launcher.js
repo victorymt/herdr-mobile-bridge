@@ -252,7 +252,7 @@ export function statusBridge(options = {}) {
     socket_present: Boolean(config.socketPath && existsSync(config.socketPath)),
     lan_proxy_host: config.lanProxyHost || null,
     lan_proxy_port: config.lanProxyHost ? config.lanProxyPort : null,
-    lan_proxy_running: Boolean(running && config.lanProxyHost),
+    lan_proxy_running: Boolean(running && config.lanProxyHost && runtime.lan_proxy_running === true),
     config_dir: config.configDir,
     state_dir: config.stateDir,
     runtime,

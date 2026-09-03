@@ -36,6 +36,7 @@ export async function startBridge(options = {}) {
       throw error;
     }
     server.lanProxy = proxy;
+    if (server.store?.initialized) await server.store.setRuntime({ ...(await server.store.getRuntime()), lan_proxy_running: true, lan_proxy_host: proxy.host, lan_proxy_port: proxy.port }).catch(() => {});
     // Consumers commonly call `server.close()` directly (including tests and
     // embedders), so make proxy shutdown part of the Bridge lifecycle rather
     // than requiring them to know about the optional LAN transport.
