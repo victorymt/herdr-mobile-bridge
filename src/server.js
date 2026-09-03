@@ -1186,4 +1186,4 @@ export class BridgeServer {
   }
 }
 
-export { readBody, writeJson, writeError, sseFrame, statusForError, normaliseOrigin };
+export { collectLanAddresses, readBody, writeJson, writeError, sseFrame, statusForError, normaliseOrigin };
