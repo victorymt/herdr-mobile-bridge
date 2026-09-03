@@ -227,3 +227,18 @@ The event hook normally posts to the loopback gateway discovered from
 `HERDR_BRIDGE_EVENT_URL` and explicitly allow its exact HTTPS origin with
 `HERDR_BRIDGE_EVENT_ALLOWED_ORIGINS` (comma-separated for multiple origins).
 The browser `allowedOrigin` setting does not replace this hook allowlist.
+
+Push subscriptions use a strict HTTPS provider allowlist by default. Private,
+local, metadata and cleartext endpoints are rejected before persistence and
+delivery. A custom relay is an explicit opt-in and should remain LAN-scoped:
+
+```text
+HERDR_BRIDGE_ALLOW_PUSH_RELAY=true
+HERDR_BRIDGE_ALLOW_CUSTOM_PUSH_ENDPOINTS=true
+HERDR_BRIDGE_PUSH_ENDPOINT_ALLOWLIST=relay.example.test
+HERDR_BRIDGE_PUSH_TIMEOUT_MS=5000
+```
+
+The timeout is bounded to 60 seconds. Do not enable the relay or custom
+endpoint flag for an untrusted network; the browser token protects the control
+API, but it is not a substitute for HTTPS or a host firewall.
