@@ -37,7 +37,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .topbar h1 { margin: 0; font-size: 21px; letter-spacing: -.035em; }
 .top-actions { gap: 12px; }
 .connection { gap: 7px; color: var(--muted); font-size: 12px; white-space: nowrap; }
-.dot, .live-pill span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-strong); box-shadow: 0 0 0 4px rgba(93, 214, 154, .12); }
+.dot, .live-pill > span:first-child { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-strong); box-shadow: 0 0 0 4px rgba(93, 214, 154, .12); }
 .dot.offline { background: var(--danger); box-shadow: 0 0 0 4px rgba(255, 158, 150, .12); }
 .ghost-button, .icon-button, .text-button { border: 0; background: transparent; }
 .ghost-button { padding: 6px 0; color: var(--muted); font-size: 12px; }
@@ -46,6 +46,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .hero-card { margin-bottom: 16px; padding: 20px; border: 1px solid #39624d; border-radius: var(--radius); background: linear-gradient(145deg, #1a382b, #12251d 58%, #102019); box-shadow: var(--shadow); }
 .hero-meta { justify-content: space-between; color: var(--muted); font-size: 11px; }
 .live-pill { display: flex; align-items: center; gap: 8px; color: var(--accent); }
+.live-pill.offline { color: var(--danger); }
+.live-pill.offline > span:first-child { background: var(--danger); box-shadow: 0 0 0 4px rgba(255, 159, 152, .12); }
 .agent-row { justify-content: space-between; gap: 20px; min-height: 102px; margin: 18px 0 17px; }
 .agent-copy { min-width: 0; }
 .agent-row h2 { margin: 0 0 7px; overflow-wrap: anywhere; font-size: clamp(23px, 7vw, 31px); letter-spacing: -.045em; }
@@ -151,6 +153,7 @@ select { width: 100%; padding: 9px 10px; font-size: 12px; }
 .push-copy { min-width: 0; gap: 11px; }
 .push-symbol { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border-radius: 10px; background: #224a37; color: var(--accent); font-size: 20px; }
 .push-card p:not(.eyebrow) { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.push-card .push-hint { color: var(--faint); font-size: 10px; }
 .primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 39px; border: 0; border-radius: 10px; background: var(--accent); color: #092016; padding: 10px 14px; font-size: 12px; font-weight: 750; white-space: nowrap; }
 .primary-button:hover { background: #c2f8da; }
 .primary-button:disabled { cursor: default; opacity: .55; }
@@ -455,7 +458,8 @@ body::before {
 .discovery-hint { color:var(--faint); }
 .discovery-urls { display:grid; gap:7px; margin-top:9px; }
 .discovery-url { display:flex; align-items:center; gap:8px; min-width:0; }
-.discovery-url code { flex:1; min-width:0; overflow-wrap:anywhere; color:var(--accent); font-size:11px; }
+.discovery-link { display:flex; align-items:center; flex:1; min-width:0; min-height:44px; overflow-wrap:anywhere; word-break:break-word; color:var(--accent); font-size:11px; line-height:1.4; text-decoration:none; }
+.discovery-link:hover, .discovery-link:focus-visible { color:var(--text); text-decoration:underline; }
 .discovery-url .secondary-button { flex:none; min-height:36px; padding:7px 10px; }
 .discovery-actions { display:flex; align-items:center; gap:9px; margin-top:10px; }
 .discovery-actions button { min-height:38px; }
@@ -468,7 +472,7 @@ body::before {
 #app-shell[data-status="blocked"] .hero-card { border-color: rgba(245, 198, 116, .52); }
 #app-shell[data-status="done"] .hero-card { border-color: rgba(102, 220, 164, .52); }
 #app-shell[data-status="blocked"] .live-pill { color: var(--warning); }
-#app-shell[data-status="blocked"] .live-pill span { background: var(--warning); box-shadow: 0 0 0 4px rgba(245, 198, 116, .12); }
+#app-shell[data-status="blocked"] .live-pill > span:first-child { background: var(--warning); box-shadow: 0 0 0 4px rgba(245, 198, 116, .12); }
 
 @media (min-width: 960px) {
   .shell {
@@ -508,4 +512,119 @@ body::before {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+
+/* Accessible touch targets and narrow-screen safeguards. Keep this block last
+   so later component refinements cannot accidentally shrink primary controls. */
+html, body { overflow-x: hidden; }
+.shell, .main-column, .utility-rail, .login-card { min-width: 0; }
+button, select, input, textarea { touch-action: manipulation; }
+.text-button, .ghost-button, .secondary-button, .primary-button, .reveal-button,
+.focus-item button, .key-button, .tab, .icon-button, .quick-action { min-height: 44px; }
+.text-button, .ghost-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; }
+.icon-button { min-width: 44px; }
+.tab { padding-top: 8px; padding-bottom: 8px; }
+/* These selectors have higher specificity than the compact discovery rules
+   above; keep their interactive targets at the same 44px minimum as the rest
+   of the mobile surface. */
+.discovery-url .secondary-button, .discovery-actions button { min-height: 44px; }
+select, .token-field input { min-height: 44px; }
+.hero-meta { flex-wrap: wrap; gap: 7px 12px; }
+.sync-detail { min-width: 0; color: var(--faint); font-size: 10px; text-align: center; }
+.output-console, .output-preview { overscroll-behavior: contain; scrollbar-gutter: stable; }
+.discovery-url { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
+.discovery-link { overflow-wrap: anywhere; word-break: break-word; }
+.discovery-qr { width: 128px; height: 128px; padding: 5px; }
+.discovery-qr img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.discovery-actions { flex-wrap: wrap; }
+.discovery-test-status { min-height: 22px; display: inline-flex; align-items: center; }
+.focus-item { min-width: 0; }
+.focus-item > div { min-width: 0; }
+.focus-item button { padding: 8px 14px; }
+.offline-banner { max-width: 70ch; margin-right: auto; margin-left: auto; }
+.update-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 70ch; margin: 12px auto 0; padding: 10px 12px; border: 1px solid rgba(102, 220, 164, .3); border-radius: 10px; background: rgba(17, 35, 27, .85); color: var(--muted); font-size: 12px; }
+.update-banner .secondary-button { flex: none; min-height: 44px; }
+.mobile-actions { display: none; }
+
+@media (max-width: 599px) {
+  .shell { padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
+  /* The fixed bottom navigation is the primary mobile view switcher; keep
+     the desktop tab strip out of the way so the first panel controls are not
+     hidden behind it on short screens. */
+  .tabs { display: none; }
+  .main-column > .view { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .topbar { align-items: flex-start; flex-wrap: wrap; }
+  .brand-line { min-width: 0; flex: 1 1 190px; }
+  .brand-line > div:last-child { min-width: 0; }
+  .top-actions { flex: 1 1 100%; justify-content: flex-end; margin-top: -2px; }
+  .connection { min-height: 44px; }
+  .hero-meta { align-items: flex-start; }
+  .hero-meta .sync-detail { order: 3; flex-basis: 100%; text-align: left; }
+  .heading-actions { flex-wrap: wrap; justify-content: flex-end; gap: 2px 8px; }
+  .output-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .output-toolbar label { grid-column: 1 / -1; }
+  .output-toolbar select { min-height: 44px; }
+  .output-toolbar .secondary-button { min-width: 74px; }
+  .focus-item { align-items: flex-start; }
+  .focus-item button { align-self: center; }
+  .control-card-heading { flex-wrap: wrap; }
+  .connection-guide-heading { align-items: flex-start; }
+  .update-banner { align-items: flex-start; flex-direction: column; }
+  .update-banner .secondary-button { width: 100%; }
+  .mobile-actions {
+    position: fixed;
+    right: 10px;
+    bottom: calc(8px + env(safe-area-inset-bottom));
+    left: 10px;
+    z-index: 4;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+    padding: 5px;
+    border: 1px solid rgba(102, 220, 164, .28);
+    border-radius: 16px;
+    background: rgba(7, 17, 15, .94);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+    backdrop-filter: blur(16px);
+  }
+  .mobile-actions.has-attention { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .mobile-actions button {
+    display: grid;
+    place-items: center;
+    gap: 1px;
+    min-height: 52px;
+    border: 0;
+    border-radius: 11px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .mobile-actions button span:first-child { color: var(--accent-strong); font-size: 17px; line-height: 1; }
+  .mobile-actions button[data-view="attention"] span:first-child { color: var(--warning); }
+  .mobile-actions button:hover, .mobile-actions button.is-active { background: var(--surface-2); color: var(--text); }
+  .view { scroll-margin-top: 12px; }
+}
+
+@media (max-width: 420px) {
+  .shell { padding-right: 12px; padding-left: 12px; }
+  .login-screen { padding-right: 10px; padding-left: 10px; }
+  .login-card { padding: 23px 15px 17px; border-radius: 18px; }
+  .login-card h1 { font-size: clamp(27px, 10vw, 35px); }
+  .connection-guide { padding: 11px; }
+  .discovery-url { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+  .discovery-url .discovery-qr, .discovery-url .qr-fallback { grid-column: 2; grid-row: 1 / span 2; }
+  .discovery-qr { width: 104px; height: 104px; }
+  .discovery-url .secondary-button { grid-column: 1; grid-row: 2; justify-self: start; min-width: 74px; }
+  .discovery-url .discovery-link { grid-column: 1; grid-row: 1; }
+  .metrics > div { padding-left: 8px; }
+  .metrics b { font-size: 15px; }
+  .focus-item { gap: 8px; padding: 11px; }
+  .focus-item button { padding-right: 10px; padding-left: 10px; }
+  .keypad { gap: 5px; }
+  .key-button { min-height: 44px; padding-right: 3px; padding-left: 3px; font-size: 11px; }
+  .heading-actions .text-button { padding-right: 3px; padding-left: 3px; font-size: 11px; }
+}
+
+@media (min-width: 960px) {
+  .hero-meta .sync-detail { margin-left: auto; }
 }

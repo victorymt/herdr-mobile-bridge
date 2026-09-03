@@ -9,6 +9,7 @@ function loadServiceWorker() {
   const listeners = new Map();
   const shown = [];
   const waits = [];
+  let skipWaitingCalls = 0;
   const cache = {
     addAll: async () => {},
     put: async () => {},
@@ -21,7 +22,7 @@ function loadServiceWorker() {
   const self = {
     location: { origin: 'https://bridge.example.test' },
     addEventListener(name, listener) { listeners.set(name, listener); },
-    skipWaiting: async () => {},
+    skipWaiting: async () => { skipWaitingCalls += 1; },
     clients,
     registration: {
       showNotification: async (title, options) => { shown.push({ title, options }); },
@@ -42,8 +43,19 @@ function loadServiceWorker() {
     fetch: async () => ({ ok: true, clone: () => ({}) }),
   };
   vm.runInNewContext(SERVICE_WORKER_SOURCE, context, { filename: 'sw.js' });
-  return { listeners, shown, waits, self };
+  return { listeners, shown, waits, self, get skipWaitingCalls() { return skipWaitingCalls; } };
 }
+
+test('service worker keeps updates waiting until explicit user approval', async () => {
+  const worker = loadServiceWorker();
+  const installWaits = [];
+  worker.listeners.get('install')({ waitUntil(promise) { installWaits.push(promise); } });
+  await Promise.all(installWaits);
+  assert.equal(worker.skipWaitingCalls, 0);
+
+  worker.listeners.get('message')({ data: { type: 'SKIP_WAITING' } });
+  assert.equal(worker.skipWaitingCalls, 1);
+});
 
 test('service worker push keeps only safe metadata in persisted notification data', async () => {
   const worker = loadServiceWorker();
@@ -114,7 +126,7 @@ test('service worker notification clicks preserve same-origin attention links an
 });
 
 test('service worker shell cache includes the deep-link module and current version', () => {
-  assert.match(SERVICE_WORKER_SOURCE, /herdr-mobile-v15/);
+  assert.match(SERVICE_WORKER_SOURCE, /herdr-mobile-v22/);
   assert.match(SERVICE_WORKER_SOURCE, /['"]\/icon-192\.png['"]/);
   assert.match(SERVICE_WORKER_SOURCE, /['"]\/deep-link\.js['"]/);
 });

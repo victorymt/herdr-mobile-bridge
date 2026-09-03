@@ -1,11 +1,14 @@
 // Bump the shell cache whenever the dashboard assets change.  The service
 // worker is cache-first for the app shell, so keeping the old name would leave
 // existing phones serving stale JavaScript (including missing control views).
-const CACHE_NAME = 'herdr-mobile-v15';
+const CACHE_NAME = 'herdr-mobile-v22';
 const APP_SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/deep-link.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  // Keep an updated worker in the waiting phase until the open page gives
+  // explicit consent through the update banner. This prevents a background
+  // update from swapping the app shell halfway through an interaction.
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
 });
 
 self.addEventListener('activate', (event) => {
@@ -13,6 +16,10 @@ self.addEventListener('activate', (event) => {
     self.clients.claim(),
     caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))),
   ]));
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {
