@@ -179,6 +179,37 @@ test('injected server configuration cannot bypass the loopback listener boundary
   }), /loopback/);
 });
 
+test('resolved push policy propagates to the state store and delivery manager', async () => {
+  const policyRoot = await mkdtemp(join(tmpdir(), 'herdr-bridge-push-policy-'));
+  const stateDir = join(policyRoot, 'state');
+  const serverWithPolicy = new BridgeServer({
+    config: {
+      host: '127.0.0.1',
+      port: 0,
+      stateDir,
+      subscriptionsPath: join(stateDir, 'subscriptions.json'),
+      dedupPath: join(stateDir, 'dedup.json'),
+      runtimePath: join(stateDir, 'runtime.json'),
+      token: 'owner-token',
+      secret: 'hook-secret',
+      pushEndpointAllowlist: ['relay.example.test'],
+      allowCustomPushEndpoints: true,
+      allowPushRelay: true,
+      pushTimeoutMs: 2345,
+    },
+    herdrClient: fakeClient,
+    webPush: {},
+  });
+  assert.deepEqual(serverWithPolicy.store.pushEndpointAllowlist, ['relay.example.test']);
+  assert.equal(serverWithPolicy.store.allowCustomEndpoints, true);
+  assert.deepEqual(serverWithPolicy.push.pushEndpointAllowlist, ['relay.example.test']);
+  assert.equal(serverWithPolicy.push.allowCustomEndpoints, true);
+  assert.equal(serverWithPolicy.push.allowRelay, true);
+  assert.equal(serverWithPolicy.push.timeoutMs, 2345);
+  await serverWithPolicy.close();
+  await rm(policyRoot, { recursive: true, force: true });
+});
+
 test('state, output and focus routes use only the injected Herdr client', async () => {
   fakeClient.calls.length = 0;
   const state = await request('/api/state');
@@ -238,7 +269,7 @@ test('internal events require the hook secret, persist statuses and push only te
 
   const add = await request('/api/push/subscriptions', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ endpoint: 'https://push.example.test/device-1', keys: { p256dh: 'p', auth: 'a' } }),
+    body: JSON.stringify({ endpoint: 'https://fcm.googleapis.com/device-1', keys: { p256dh: 'p', auth: 'a' } }),
   });
   assert.equal(add.status, 201);
   const duplicate = await request('/internal/event', {
@@ -266,7 +297,7 @@ test('push key and subscription deletion are authenticated', async () => {
   assert.equal((await key.json()).publicKey, 'test-public-key');
   const add = await request('/api/push/subscriptions', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ endpoint: 'https://push.example.test/device-2' }),
+    body: JSON.stringify({ endpoint: 'https://fcm.googleapis.com/device-2' }),
   });
   const id = (await add.json()).subscription.id;
   const removed = await request(`/api/push/subscriptions?id=${encodeURIComponent(id)}`, { method: 'DELETE' });

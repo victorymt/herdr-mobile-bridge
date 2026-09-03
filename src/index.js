@@ -33,7 +33,9 @@ export async function startBridge(options = {}) {
     // `BridgeServer.start()` can fail after creating its listener (for
     // example, an address/port race). Do not leave that listener or its
     // runtime marker behind when the optional LAN transport never starts.
-    try { await server?.close(); } catch { /* preserve the original error */ }
+    if (server) {
+      try { await server.close(); } catch { /* preserve the original error */ }
+    }
     throw error;
   }
   if (server.config.lanProxyHost) {
@@ -97,7 +99,9 @@ export async function startBridge(options = {}) {
       await persistProxyRuntime(true);
     } catch (error) {
       lifecycleClosed = true;
-      await proxy?.close().catch(() => {});
+      if (proxy) {
+        try { await proxy.close(); } catch { /* preserve the original error */ }
+      }
       await server.close();
       const detail = proxyFailure?.message || error?.message || 'unknown error';
       throw new Error(`LAN proxy health check failed: ${detail}`, { cause: error });

@@ -1,10 +1,38 @@
 import { mkdir, readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 
 const MAX_SUBSCRIPTIONS = 256;
 const MAX_DEDUP_ENTRIES = 4096;
 const MAX_PANE_STATUSES = 512;
 const DEDUP_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Browser push subscriptions normally point at one of these vendor
+ * endpoints.  Keeping the default set small prevents an authenticated caller
+ * from turning the bridge into an arbitrary HTTPS client (SSRF).  A custom
+ * relay/provider can be enabled explicitly with `allowCustomEndpoints` or an
+ * additional `pushEndpointAllowlist` entry.
+ */
+export const DEFAULT_PUSH_PROVIDER_HOSTS = Object.freeze([
+  'fcm.googleapis.com',
+  'android.googleapis.com',
+  'push.services.mozilla.com',
+  'updates.push.services.mozilla.com',
+  'web.push.apple.com',
+  'notify.windows.com',
+  'wns.windows.com',
+]);
+
+const BLOCKED_PUSH_HOSTNAMES = new Set([
+  'localhost',
+  'localhost.localdomain',
+  'ip6-localhost',
+  'ip6-loopback',
+  'metadata',
+  'metadata.google.internal',
+  'instance-data',
+]);
 
 function boundedLimit(value, fallback, maximum) {
   const number = Number(value);
@@ -20,19 +48,118 @@ function safeId(value) {
   return `sub_${createHash('sha256').update(value).digest('hex').slice(0, 24)}`;
 }
 
-function validSubscriptionShape(value) {
+function normaliseEndpointHost(value) {
+  let host = String(value || '').trim().toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  // A trailing dot is equivalent for DNS, but keeping it would bypass a
+  // suffix comparison against the provider list.
+  return host.replace(/\.$/, '');
+}
+
+function ipv4Parts(host) {
+  const parts = host.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return undefined;
+  return parts;
+}
+
+/** Return true for destinations that must never receive a push request. */
+function isPrivateOrLocalIp(host) {
+  const family = isIP(host);
+  if (family === 4) {
+    const parts = ipv4Parts(host);
+    if (!parts) return true;
+    const [first, second] = parts;
+    return first === 0
+      || first === 10
+      || first === 127
+      || (first === 100 && second >= 64 && second <= 127) // CGNAT
+      || (first === 169 && second === 254) // link-local / cloud metadata
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || (first === 192 && second === 0)
+      || (first === 198 && (second === 18 || second === 19 || second === 51))
+      || (first === 203 && second === 0 && parts[2] === 113)
+      || first >= 224; // multicast/reserved
+  }
+  if (family !== 6) return false;
+  const lower = host.toLowerCase();
+  // IPv4-mapped IPv6 literals can encode every private IPv4 range. Reject all
+  // mapped values rather than trying to parse every textual representation.
+  if (lower === '::' || lower === '::1' || lower.startsWith('::ffff:')) return true;
+  const first = Number.parseInt(lower.split(':')[0] || '0', 16);
+  if (!Number.isInteger(first)) return true;
+  return (first >= 0xfc00 && first <= 0xfdff) // ULA
+    || (first >= 0xfe80 && first <= 0xfebf) // link-local
+    || (first >= 0xfec0 && first <= 0xfeff) // deprecated site-local
+    || (first >= 0xff00 && first <= 0xffff) // multicast/reserved
+    || lower.startsWith('2001:db8:'); // documentation-only range
+}
+
+function isBlockedPushHostname(host) {
+  const value = normaliseEndpointHost(host);
+  if (!value) return true;
+  if (BLOCKED_PUSH_HOSTNAMES.has(value)) return true;
+  return value.endsWith('.localhost')
+    || value.endsWith('.local')
+    || value.endsWith('.internal')
+    || value.endsWith('.home.arpa')
+    || isPrivateOrLocalIp(value);
+}
+
+function normalisePushAllowlist(value) {
+  const values = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',') : []);
+  return [...new Set(values.flatMap((entry) => {
+    let candidate = String(entry || '').trim().toLowerCase();
+    if (!candidate) return [];
+    // Accept either a hostname/suffix or a full origin for convenience, but
+    // discard paths, credentials, and malformed entries.
+    if (candidate.includes('://')) {
+      try {
+        const parsed = new URL(candidate);
+        if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return [];
+        candidate = parsed.hostname;
+      } catch {
+        return [];
+      }
+    }
+    candidate = normaliseEndpointHost(candidate.replace(/^\*\./, ''));
+    return candidate ? [candidate] : [];
+  }))];
+}
+
+function endpointHostAllowed(host, options = {}) {
+  const custom = options.allowCustomEndpoints === true;
+  const configured = options.pushEndpointAllowlist ?? options.allowedPushEndpointHosts ?? options.endpointAllowlist;
+  const allowlist = [...DEFAULT_PUSH_PROVIDER_HOSTS, ...normalisePushAllowlist(configured)];
+  if (custom) return true;
+  return allowlist.some((rule) => host === rule || host.endsWith(`.${rule}`));
+}
+
+/**
+ * Validate a browser push subscription before it is persisted or delivered.
+ * The strict default accepts HTTPS endpoints from known browser push vendors,
+ * rejects all IP literals/private names, and requires the standard 443 port.
+ * Applications using a private relay must opt in explicitly with
+ * `allowCustomEndpoints: true`; private/local destinations remain blocked.
+ */
+function validSubscriptionShape(value, options = {}) {
   if (!value || typeof value !== 'object') return false;
-  if (typeof value.endpoint !== 'string' || value.endpoint.length < 8 || value.endpoint.length > 4096) return false;
+  if (typeof value.endpoint !== 'string') return false;
+  const endpoint = value.endpoint.trim();
+  if (endpoint.length < 8 || endpoint.length > 4096) return false;
   let url;
   try {
-    url = new URL(value.endpoint);
+    url = new URL(endpoint);
   } catch {
     return false;
   }
-  const loopback = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) return false;
+  if (url.protocol !== 'https:' || url.username || url.password || !url.hostname) return false;
+  const host = normaliseEndpointHost(url.hostname);
+  if (isBlockedPushHostname(host)) return false;
+  if (url.port && url.port !== '443' && options.allowCustomEndpoints !== true) return false;
+  if (!endpointHostAllowed(host, options)) return false;
   if (value.keys !== undefined) {
-    if (!value.keys || typeof value.keys !== 'object') return false;
+    if (!value.keys || typeof value.keys !== 'object' || Array.isArray(value.keys)) return false;
     if (value.keys.p256dh !== undefined && (typeof value.keys.p256dh !== 'string' || value.keys.p256dh.length > 2048)) return false;
     if (value.keys.auth !== undefined && (typeof value.keys.auth !== 'string' || value.keys.auth.length > 2048)) return false;
   }
@@ -46,6 +173,11 @@ export class StateStore {
     this.subscriptionsPath = options.subscriptionsPath || (this.stateDir && `${this.stateDir}/subscriptions.json`);
     this.dedupPath = options.dedupPath || (this.stateDir && `${this.stateDir}/dedup.json`);
     this.runtimePath = options.runtimePath || (this.stateDir && `${this.stateDir}/runtime.json`);
+    // Push endpoint validation is strict by default.  Keep the opt-out on the
+    // store so subscriptions loaded from disk receive the same policy as new
+    // registrations; custom relays must opt in explicitly.
+    this.pushEndpointAllowlist = options.pushEndpointAllowlist ?? options.allowedPushEndpointHosts;
+    this.allowCustomEndpoints = options.allowCustomEndpoints === true;
     this.clock = options.clock || (() => Date.now());
     this.maxSubscriptions = boundedLimit(options.maxSubscriptions, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS);
     this.maxDedupEntries = boundedLimit(options.maxDedupEntries, MAX_DEDUP_ENTRIES, MAX_DEDUP_ENTRIES);
@@ -83,7 +215,10 @@ export class StateStore {
     const raw = await readJson(this.subscriptionsPath, []);
     const list = Array.isArray(raw) ? raw : (Array.isArray(raw?.subscriptions) ? raw.subscriptions : []);
     for (const candidate of list.slice(0, this.maxSubscriptions)) {
-      if (!validSubscriptionShape(candidate)) continue;
+      if (!validSubscriptionShape(candidate, {
+        pushEndpointAllowlist: this.pushEndpointAllowlist,
+        allowCustomEndpoints: this.allowCustomEndpoints,
+      })) continue;
       const normalized = normalizeSubscription(candidate);
       this.subscriptions.set(normalized.id, normalized);
     }
@@ -204,7 +339,10 @@ export class StateStore {
 
   async addSubscription(value) {
     await this.init();
-    if (!validSubscriptionShape(value)) throw new Error('invalid push subscription');
+    if (!validSubscriptionShape(value, {
+      pushEndpointAllowlist: this.pushEndpointAllowlist,
+      allowCustomEndpoints: this.allowCustomEndpoints,
+    })) throw new Error('invalid push subscription');
     return this.#enqueue(async () => {
       const normalized = normalizeSubscription(value);
       // One endpoint represents one device; replacing it avoids duplicate

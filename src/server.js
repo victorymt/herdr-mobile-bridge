@@ -350,11 +350,28 @@ export class BridgeServer {
     this.logger = options.logger || console;
     this.herdrClient = options.herdrClient;
     this.networkInterfaces = options.networkInterfaces || networkInterfaces;
+    // `loadConfig()` exposes canonical push-policy names. Keep historical
+    // aliases usable for embedders constructing BridgeServer directly, while
+    // giving an explicitly supplied canonical value precedence.
+    const pushEndpointAllowlist = this.config.pushEndpointAllowlist
+      ?? this.config.allowedPushEndpointHosts;
+    const allowCustomEndpoints = this.config.allowCustomPushEndpoints !== undefined
+      ? this.config.allowCustomPushEndpoints === true
+      : this.config.allowCustomEndpoints === true;
+    const allowPushRelay = this.config.allowPushRelay !== undefined
+      ? this.config.allowPushRelay === true
+      : this.config.allowRelay === true;
     this.store = options.store || new StateStore({
       stateDir: this.config.stateDir,
       subscriptionsPath: this.config.subscriptionsPath,
       dedupPath: this.config.dedupPath,
       runtimePath: this.config.runtimePath,
+      // Keep subscription validation consistent with the resolved bridge
+      // configuration.  The store validates both newly registered and
+      // persisted subscriptions, so policy must be passed at construction
+      // time rather than applied only by the HTTP handler.
+      pushEndpointAllowlist,
+      allowCustomEndpoints,
     });
     this.auth = options.auth || new AuthManager({
       token: this.config.token,
@@ -368,6 +385,10 @@ export class BridgeServer {
       sender: options.pushSender,
       webPush: options.webPush,
       fetch: options.fetch,
+      pushEndpointAllowlist,
+      allowCustomEndpoints,
+      allowRelay: allowPushRelay,
+      timeoutMs: this.config.pushTimeoutMs,
     });
     this.eventBus = options.eventBus || new EventBus({
       store: this.store,

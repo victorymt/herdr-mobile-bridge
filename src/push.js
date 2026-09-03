@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module';
 
+import { validSubscriptionShape } from './state-store.js';
+
 const require = createRequire(import.meta.url);
 let optionalWebPush;
 try {
@@ -18,6 +20,7 @@ const DEFAULT_TTL_SECONDS = 300;
 // short-lived. Four weeks is the Web Push protocol's practical upper bound.
 const MIN_TTL_SECONDS = 30;
 const MAX_TTL_SECONDS = 2_419_200;
+const MAX_PUSH_TIMEOUT_MS = 60_000;
 
 // Notification links are deliberately metadata-only.  The bridge never puts
 // terminal output (or arbitrary plugin fields) in a URL that can be copied to
@@ -60,9 +63,19 @@ export class PushManager {
     this.fetch = options.fetch || globalThis.fetch;
     this.webPush = options.webPush || optionalWebPush;
     this.allowRelay = options.allowRelay === true;
+    // Keep endpoint policy in the delivery adapter as well as StateStore:
+    // embedders may inject a store with no validation, and persisted entries
+    // can predate the stricter policy. Custom relays/providers must opt in.
+    this.pushEndpointAllowlist = options.pushEndpointAllowlist
+      ?? options.allowedPushEndpointHosts
+      ?? this.store?.pushEndpointAllowlist;
+    this.allowCustomEndpoints = options.allowCustomEndpoints === true || this.store?.allowCustomEndpoints === true;
     this.sender = options.sender || ((subscription, payload) => this.sendHttp(subscription, payload));
     this.clock = options.clock || (() => Date.now());
-    this.timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : PUSH_TIMEOUT_MS;
+    const timeout = Number(options.timeoutMs);
+    this.timeoutMs = Number.isFinite(timeout) && timeout > 0
+      ? Math.min(Math.floor(timeout), MAX_PUSH_TIMEOUT_MS)
+      : PUSH_TIMEOUT_MS;
     this.logger = options.logger || console;
   }
 
@@ -73,6 +86,10 @@ export class PushManager {
   async register(value) {
     if (!this.store) throw new Error('push state store is not configured');
     const candidate = value?.subscription && typeof value.subscription === 'object' ? value.subscription : value;
+    if (!validSubscriptionShape(candidate, {
+      pushEndpointAllowlist: this.pushEndpointAllowlist,
+      allowCustomEndpoints: this.allowCustomEndpoints,
+    })) throw new Error('invalid push subscription');
     const subscription = await this.store.addSubscription(candidate);
     return publicSubscription(subscription);
   }
@@ -93,6 +110,10 @@ export class PushManager {
     const results = [];
     for (const subscription of subscriptions) {
       try {
+        if (!validSubscriptionShape(subscription, {
+          pushEndpointAllowlist: this.pushEndpointAllowlist,
+          allowCustomEndpoints: this.allowCustomEndpoints,
+        })) throw new Error('invalid push subscription endpoint');
         const result = await this.sender(subscription, payload);
         results.push({ id: subscription.id, ok: true, result });
       } catch (error) {
@@ -112,6 +133,18 @@ export class PushManager {
   }
 
   async sendHttp(subscription, payload) {
+    // `sendHttp()` is public on the delivery adapter and can be called by
+    // embedders directly, bypassing `notify()`'s loop validation. Re-apply the
+    // same endpoint policy at the final network boundary so an injected or
+    // legacy store cannot turn the bridge into an arbitrary HTTP client.
+    if (!validSubscriptionShape(subscription, {
+      pushEndpointAllowlist: this.pushEndpointAllowlist,
+      allowCustomEndpoints: this.allowCustomEndpoints,
+    })) {
+      const error = new Error('invalid push subscription endpoint');
+      error.status = 400;
+      throw error;
+    }
     if (this.webPush?.sendNotification && this.vapid.publicKey && this.vapid.privateKey) {
       if (this.vapid.subject && this.webPush.setVapidDetails) {
         // setVapidDetails is idempotent for a given process; call it here so a
@@ -119,9 +152,14 @@ export class PushManager {
         this.webPush.setVapidDetails(this.vapid.subject, this.vapid.publicKey, this.vapid.privateKey);
       }
       try {
-        return await this.webPush.sendNotification(subscription, JSON.stringify(payload), {
+        const request = this.webPush.sendNotification(subscription, JSON.stringify(payload), {
           TTL: normaliseTtl(payload.ttl),
+          // web-push forwards this to https.request and destroys a stalled
+          // socket. The outer timeout below also protects injected adapters
+          // that do not implement the option.
+          timeout: this.timeoutMs,
         });
+        return await withTimeout(request, this.timeoutMs, 'push delivery timed out');
       } catch (error) {
         // Preserve HTTP status/code from web-push for stale subscription
         // cleanup in notify().
@@ -135,7 +173,7 @@ export class PushManager {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await this.fetch(subscription.endpoint, {
+      const response = await withTimeout(this.fetch(subscription.endpoint, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -144,7 +182,7 @@ export class PushManager {
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
-      });
+      }), this.timeoutMs, 'push relay timed out');
       if (!response?.ok) {
         const error = new Error(`push endpoint returned HTTP ${response?.status ?? 0}`);
         error.status = response?.status;
@@ -155,6 +193,19 @@ export class PushManager {
       clearTimeout(timeout);
     }
   }
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(message);
+      error.code = 'push_timeout';
+      error.status = 504;
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
 }
 
 export function makePushPayload(event, options = {}) {
@@ -321,6 +372,7 @@ export {
   DEFAULT_TTL_SECONDS,
   MIN_TTL_SECONDS,
   MAX_TTL_SECONDS,
+  MAX_PUSH_TIMEOUT_MS,
   ATTENTION_VIEW,
   MAX_DEEPLINK_URL_LENGTH,
   DEEPLINK_FIELD_LIMITS,

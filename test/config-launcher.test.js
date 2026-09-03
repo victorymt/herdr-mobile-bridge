@@ -175,3 +175,47 @@ test('LAN configuration keeps the bridge loopback-only and rejects wildcard prox
   assert.throws(() => loadConfigSync({ ...base, lanProxyHost: '192.168.1.20', lanProxyPort: 0 }), /between 1 and 65535/);
   await rm(root, { recursive: true, force: true });
 });
+
+test('push policy settings resolve consistently for async and sync config loaders', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-push-config-'));
+  const options = {
+    configDir: join(root, 'config'),
+    stateDir: join(root, 'state'),
+    token: 't',
+    secret: 's',
+    persistGenerated: false,
+    pushEndpointAllowlist: ['relay.example.test', 'https://relay.example.test/'],
+    allowCustomPushEndpoints: true,
+    allowPushRelay: true,
+    pushTimeoutMs: 1234,
+  };
+  const asyncConfig = await loadConfig(options);
+  const syncConfig = loadConfigSync(options);
+  for (const config of [asyncConfig, syncConfig]) {
+    assert.deepEqual(config.pushEndpointAllowlist, options.pushEndpointAllowlist);
+    assert.equal(config.allowCustomPushEndpoints, true);
+    assert.equal(config.allowPushRelay, true);
+    assert.equal(config.pushTimeoutMs, 1234);
+  }
+  assert.deepEqual(syncConfig.pushEndpointAllowlist, asyncConfig.pushEndpointAllowlist);
+  assert.equal(syncConfig.allowCustomPushEndpoints, asyncConfig.allowCustomPushEndpoints);
+  assert.equal(syncConfig.allowPushRelay, asyncConfig.allowPushRelay);
+  assert.equal(syncConfig.pushTimeoutMs, asyncConfig.pushTimeoutMs);
+  await rm(root, { recursive: true, force: true });
+});
+
+test('push timeout parser keeps every accepted positive value at least one millisecond', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-push-timeout-bound-'));
+  const base = {
+    configDir: join(root, 'config'),
+    stateDir: join(root, 'state'),
+    token: 't',
+    secret: 's',
+    persistGenerated: false,
+  };
+  const config = loadConfigSync({ ...base, pushTimeoutMs: 0.5 });
+  assert.equal(config.pushTimeoutMs, 1);
+  const fallback = loadConfigSync({ ...base, pushTimeoutMs: 0 });
+  assert.equal(fallback.pushTimeoutMs, 5000);
+  await rm(root, { recursive: true, force: true });
+});

@@ -8,6 +8,8 @@ import { join, resolve } from 'node:path';
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8787;
 export const DEFAULT_LAN_PROXY_PORT = 18787;
+export const DEFAULT_PUSH_TIMEOUT_MS = 5000;
+export const MAX_PUSH_TIMEOUT_MS = 60_000;
 export const DEFAULT_CONFIG_NAME = 'herdr-mobile-bridge';
 export const DEFAULT_HERDR_SOCKET = '/tmp/herdr.sock';
 
@@ -138,6 +140,57 @@ function parseBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+}
+
+function parseBoundedPositive(value, fallback, maximum = Number.MAX_SAFE_INTEGER) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return fallback;
+  // Flooring a fractional positive value (for example `0.5`) used to yield
+  // zero, which violates the "positive" contract and can disable timeout
+  // safeguards. Clamp the lower bound after flooring as well as before it.
+  const upper = Number.isFinite(Number(maximum)) ? Math.max(1, Math.floor(Number(maximum))) : Number.MAX_SAFE_INTEGER;
+  return Math.min(Math.max(1, Math.floor(number)), upper);
+}
+
+function pushEndpointAllowlistValue(options, env, fileConfig) {
+  return options.pushEndpointAllowlist
+    ?? options.allowedPushEndpointHosts
+    ?? firstEnv(env, [
+      'HERDR_BRIDGE_PUSH_ENDPOINT_ALLOWLIST',
+      'BRIDGE_PUSH_ENDPOINT_ALLOWLIST',
+      'HERDR_PUSH_ENDPOINT_ALLOWLIST',
+    ])
+    ?? fileConfig.pushEndpointAllowlist
+    ?? fileConfig.allowedPushEndpointHosts;
+}
+
+function pushPolicyValues(options, env, fileConfig) {
+  return {
+    pushEndpointAllowlist: pushEndpointAllowlistValue(options, env, fileConfig),
+    allowCustomPushEndpoints: parseBoolean(
+      options.allowCustomPushEndpoints
+        ?? options.allowCustomEndpoints
+        ?? firstEnv(env, ['HERDR_BRIDGE_ALLOW_CUSTOM_PUSH_ENDPOINTS', 'BRIDGE_ALLOW_CUSTOM_PUSH_ENDPOINTS'])
+        ?? fileConfig.allowCustomPushEndpoints
+        ?? fileConfig.allowCustomEndpoints,
+      false,
+    ),
+    allowPushRelay: parseBoolean(
+      options.allowPushRelay
+        ?? options.allowRelay
+        ?? firstEnv(env, ['HERDR_BRIDGE_ALLOW_PUSH_RELAY', 'BRIDGE_ALLOW_PUSH_RELAY'])
+        ?? fileConfig.allowPushRelay
+        ?? fileConfig.allowRelay,
+      false,
+    ),
+    pushTimeoutMs: parseBoundedPositive(
+      options.pushTimeoutMs
+        ?? firstEnv(env, ['HERDR_BRIDGE_PUSH_TIMEOUT_MS', 'BRIDGE_PUSH_TIMEOUT_MS'])
+        ?? fileConfig.pushTimeoutMs,
+      DEFAULT_PUSH_TIMEOUT_MS,
+      MAX_PUSH_TIMEOUT_MS,
+    ),
+  };
 }
 
 async function ensurePrivateDir(path) {
@@ -392,6 +445,7 @@ export async function loadConfig(options = {}) {
   const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
   const requestTimeoutMs = Number(options.requestTimeoutMs ?? fileConfig.requestTimeoutMs ?? 5000);
   const maxBodyBytes = Number(options.maxBodyBytes ?? fileConfig.maxBodyBytes ?? 1024 * 1024);
+  const pushPolicy = pushPolicyValues(options, env, fileConfig);
   const vapidSubject = vapidSubjectValue(options, env, fileConfig, vapid);
   const finalVapid = { ...vapid, subject: vapidSubject };
   return {
@@ -408,6 +462,7 @@ export async function loadConfig(options = {}) {
     sessionTtlMs: Number.isFinite(sessionTtlMs) && sessionTtlMs > 0 ? sessionTtlMs : 7 * 24 * 60 * 60 * 1000,
     requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 5000,
     maxBodyBytes: Number.isFinite(maxBodyBytes) && maxBodyBytes > 0 ? maxBodyBytes : 1024 * 1024,
+    ...pushPolicy,
     cookieSecure: parseBoolean(options.cookieSecure ?? firstEnv(env, ['HERDR_BRIDGE_COOKIE_SECURE', 'BRIDGE_COOKIE_SECURE']) ?? fileConfig.cookieSecure, false),
     healthDetails: parseBoolean(options.healthDetails ?? firstEnv(env, ['HERDR_BRIDGE_HEALTH_DETAILS', 'BRIDGE_HEALTH_DETAILS']) ?? fileConfig.healthDetails, false),
     allowSseQueryToken: parseBoolean(options.allowSseQueryToken ?? firstEnv(env, ['HERDR_BRIDGE_ALLOW_SSE_QUERY_TOKEN', 'BRIDGE_ALLOW_SSE_QUERY_TOKEN']) ?? fileConfig.allowSseQueryToken, false),
@@ -474,6 +529,7 @@ export function loadConfigSync(options = {}) {
   const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
   const requestTimeoutMs = Number(options.requestTimeoutMs ?? fileConfig.requestTimeoutMs ?? 5000);
   const maxBodyBytes = Number(options.maxBodyBytes ?? fileConfig.maxBodyBytes ?? 1024 * 1024);
+  const pushPolicy = pushPolicyValues(options, env, fileConfig);
   const vapidSubject = vapidSubjectValue(options, env, fileConfig, vapid);
   const finalVapid = { ...vapid, subject: vapidSubject };
   return {
@@ -490,6 +546,7 @@ export function loadConfigSync(options = {}) {
     sessionTtlMs: Number.isFinite(sessionTtlMs) && sessionTtlMs > 0 ? sessionTtlMs : 7 * 24 * 60 * 60 * 1000,
     requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 5000,
     maxBodyBytes: Number.isFinite(maxBodyBytes) && maxBodyBytes > 0 ? maxBodyBytes : 1024 * 1024,
+    ...pushPolicy,
     cookieSecure: parseBoolean(options.cookieSecure ?? firstEnv(env, ['HERDR_BRIDGE_COOKIE_SECURE', 'BRIDGE_COOKIE_SECURE']) ?? fileConfig.cookieSecure, false),
     healthDetails: parseBoolean(options.healthDetails ?? firstEnv(env, ['HERDR_BRIDGE_HEALTH_DETAILS', 'BRIDGE_HEALTH_DETAILS']) ?? fileConfig.healthDetails, false),
     allowSseQueryToken: parseBoolean(options.allowSseQueryToken ?? firstEnv(env, ['HERDR_BRIDGE_ALLOW_SSE_QUERY_TOKEN', 'BRIDGE_ALLOW_SSE_QUERY_TOKEN']) ?? fileConfig.allowSseQueryToken, false),

@@ -104,6 +104,9 @@ test('relay delivery sends the normalized TTL and removes expired subscriptions'
     // explicit relay path is exercised deterministically.
     webPush: {},
     allowRelay: true,
+    // This test exercises a synthetic relay endpoint rather than a vendor
+    // service; production uses the strict provider allowlist by default.
+    allowCustomEndpoints: true,
     fetch: async (endpoint, options) => {
       calls.push({ endpoint, options });
       return { ok: true, status: 202 };
