@@ -1,14 +1,8 @@
 import net from 'node:net';
 
-export const DEFAULT_LAN_PROXY_PORT = 18787;
+import { assertLanProxyHost } from './config.js';
 
-function assertHost(host) {
-  const value = typeof host === 'string' ? host.trim() : '';
-  if (!value || value === '0.0.0.0' || value === '::' || /[\u0000-\u001f\u007f]/.test(value)) {
-    throw new TypeError('LAN proxy host must be an explicit interface address');
-  }
-  return value;
-}
+export const DEFAULT_LAN_PROXY_PORT = 18787;
 
 function assertPort(port) {
   const value = Number(port);
@@ -19,7 +13,7 @@ function assertPort(port) {
 /** A deliberately small, unauthenticated TCP forwarder for trusted LAN use. */
 export class LanProxy {
   constructor(options = {}) {
-    this.host = assertHost(options.host);
+    this.host = assertLanProxyHost(options.host);
     this.port = assertPort(options.port ?? DEFAULT_LAN_PROXY_PORT);
     this.targetHost = options.targetHost || '127.0.0.1';
     this.targetPort = assertPort(options.targetPort ?? 8787);
@@ -248,4 +242,4 @@ export class LanProxy {
   }
 }
 
-export { assertHost as assertLanProxyHost, assertPort as assertLanProxyPort };
+export { assertLanProxyHost, assertPort as assertLanProxyPort };

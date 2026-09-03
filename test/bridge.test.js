@@ -147,6 +147,38 @@ test('health is public and protected routes reject missing auth', async () => {
   assert.doesNotMatch(qrSvg, /owner-token|token|secret/i);
 });
 
+test('failed bridge listen cleans up the listener so a retry cannot inherit stale state', async () => {
+  const conflictRoot = await mkdtemp(join(tmpdir(), 'herdr-bridge-conflict-'));
+  const port = server.address().port;
+  const conflict = new BridgeServer({
+    config: {
+      host: '127.0.0.1',
+      port,
+      stateDir: join(conflictRoot, 'state'),
+      runtimePath: join(conflictRoot, 'state', 'runtime.json'),
+      subscriptionsPath: join(conflictRoot, 'state', 'subscriptions.json'),
+      dedupPath: join(conflictRoot, 'state', 'dedup.json'),
+      socketPath: '/tmp/herdr-conflict.sock',
+      token: 'owner-token',
+      secret: 'hook-secret',
+      vapid: { publicKey: 'test-public-key', privateKey: 'test-private-key' },
+    },
+    herdrClient: fakeClient,
+  });
+  await assert.rejects(() => conflict.start(), (error) => Boolean(error?.code));
+  assert.equal(conflict.server, null);
+  assert.equal(conflict.started, false);
+  await conflict.close();
+  await rm(conflictRoot, { recursive: true, force: true });
+});
+
+test('injected server configuration cannot bypass the loopback listener boundary', () => {
+  assert.throws(() => new BridgeServer({
+    config: { host: '0.0.0.0', token: 'owner-token', secret: 'hook-secret' },
+    herdrClient: fakeClient,
+  }), /loopback/);
+});
+
 test('state, output and focus routes use only the injected Herdr client', async () => {
   fakeClient.calls.length = 0;
   const state = await request('/api/state');

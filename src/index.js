@@ -25,26 +25,98 @@ export async function createBridgeServer(options = {}) {
 }
 
 export async function startBridge(options = {}) {
-  const server = await createBridgeServer(options);
-  await server.start();
+  let server;
+  try {
+    server = await createBridgeServer(options);
+    await server.start();
+  } catch (error) {
+    // `BridgeServer.start()` can fail after creating its listener (for
+    // example, an address/port race). Do not leave that listener or its
+    // runtime marker behind when the optional LAN transport never starts.
+    try { await server?.close(); } catch { /* preserve the original error */ }
+    throw error;
+  }
   if (server.config.lanProxyHost) {
-    const proxy = new LanProxy({ host: server.config.lanProxyHost, port: server.config.lanProxyPort, targetPort: server.address().port });
+    let proxy;
+    let proxyStarted = false;
+    let lifecycleClosed = false;
+    let proxyFailureReported = false;
+    let proxyFailure;
+    let closePromise;
+    let runtimeUpdate = Promise.resolve();
+    const persistProxyRuntime = (running, error) => {
+      runtimeUpdate = runtimeUpdate.then(async () => {
+        if (!server.store?.initialized) return;
+        try {
+          const runtime = await server.store.getRuntime();
+          await server.store.setRuntime({
+            ...runtime,
+            lan_proxy_running: Boolean(running),
+            lan_proxy_host: proxy?.host || server.config.lanProxyHost,
+            lan_proxy_port: proxy?.port || server.config.lanProxyPort,
+            lan_proxy_error: error ? String(error.message || error).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 240) : null,
+          });
+        } catch {
+          // Runtime metadata is diagnostic; a persistence failure must not
+          // turn a functioning LAN proxy into a failed startup.
+        }
+      }).catch(() => {});
+      return runtimeUpdate;
+    };
+    const onProxyFailure = (error) => {
+      proxyFailure = error instanceof Error ? error : new Error(String(error || 'LAN proxy failed'));
+      proxyFailureReported = true;
+      // Startup failures are reported through the rejected startBridge()
+      // promise. Persist only failures observed after a healthy listener has
+      // been published, otherwise a late diagnostic could recreate a runtime
+      // marker after the failed server has already been closed.
+      if (!proxyStarted || lifecycleClosed) return;
+      void persistProxyRuntime(false, error);
+    };
     try {
-    try { await proxy.start(); } catch (error) { await server.close(); throw new Error(`LAN proxy health check failed: ${error.message}`); }
+      proxy = new LanProxy({
+        host: server.config.lanProxyHost,
+        port: server.config.lanProxyPort,
+        targetPort: server.address().port,
+        onError: onProxyFailure,
+        onClose: () => {
+          // A listener error invokes onError before the asynchronous close
+          // callback. Preserve that more useful diagnostic instead of
+          // replacing it with the generic "stopped" message.
+          if (!proxyFailureReported) onProxyFailure(new Error('LAN proxy stopped'));
+        },
+      });
+      // Publish the proxy reference before probing so an asynchronous listener
+      // failure cannot be mistaken for a healthy Bridge by discovery callers.
+      server.lanProxy = proxy;
+      await proxy.start();
+      if (proxyFailure || !proxy.server || proxy.healthy !== true) {
+        throw proxyFailure || new Error('LAN proxy became unhealthy during startup');
+      }
+      proxyStarted = true;
+      await persistProxyRuntime(true);
     } catch (error) {
+      lifecycleClosed = true;
+      await proxy?.close().catch(() => {});
       await server.close();
-      throw error;
+      const detail = proxyFailure?.message || error?.message || 'unknown error';
+      throw new Error(`LAN proxy health check failed: ${detail}`, { cause: error });
     }
-    server.lanProxy = proxy;
-    if (server.store?.initialized) await server.store.setRuntime({ ...(await server.store.getRuntime()), lan_proxy_running: true, lan_proxy_host: proxy.host, lan_proxy_port: proxy.port }).catch(() => {});
     // Consumers commonly call `server.close()` directly (including tests and
     // embedders), so make proxy shutdown part of the Bridge lifecycle rather
     // than requiring them to know about the optional LAN transport.
     const closeBridge = server.close.bind(server);
     server.close = async () => {
-      await proxy.close();
-      server.lanProxy = null;
-      return closeBridge();
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        lifecycleClosed = true;
+        try { await proxy.close(); } finally {
+          await persistProxyRuntime(false);
+          server.lanProxy = null;
+          await closeBridge();
+        }
+      })();
+      return closePromise;
     };
   }
   return server;
@@ -100,7 +172,6 @@ export async function main(argv = process.argv.slice(2)) {
   const stop = async () => {
     if (stopping) return;
     stopping = true;
-    await server.lanProxy?.close();
     await server.close();
   };
   process.once('SIGINT', () => { void stop().finally(() => process.exit(0)); });

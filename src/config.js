@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, writeFile, rename, lstat } from 'node:fs/promises';
 import { existsSync, readFileSync, mkdirSync, chmodSync, writeFileSync, renameSync, lstatSync } from 'node:fs';
 import { randomBytes, createECDH } from 'node:crypto';
+import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -9,6 +10,33 @@ export const DEFAULT_PORT = 8787;
 export const DEFAULT_LAN_PROXY_PORT = 18787;
 export const DEFAULT_CONFIG_NAME = 'herdr-mobile-bridge';
 export const DEFAULT_HERDR_SOCKET = '/tmp/herdr.sock';
+
+/**
+ * Keep the Bridge itself on loopback.  LAN access is intentionally provided
+ * by the separate forwarding listener; accepting a wildcard here would
+ * bypass that boundary and expose the authenticated service directly.
+ */
+export function assertBridgeHost(host = DEFAULT_HOST) {
+  const value = typeof host === 'string' ? host.trim() : '';
+  if (!value || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new TypeError('bridge host must be a loopback address');
+  }
+  if (value.toLowerCase() === 'localhost') return value;
+  const family = isIP(value);
+  if (family === 4 && Number(value.split('.')[0]) === 127) return value;
+  if (family === 6 && (value === '::1' || value.toLowerCase() === '::ffff:127.0.0.1')) return value;
+  throw new TypeError('bridge host must be a loopback address');
+}
+
+/** LAN proxy listeners must bind one explicit IP, never a wildcard. */
+export function assertLanProxyHost(host) {
+  const value = typeof host === 'string' ? host.trim() : '';
+  if (!value || /[\u0000-\u001f\u007f]/.test(value) || value === '0.0.0.0' || value === '::' || value === '*') {
+    throw new TypeError('LAN proxy host must be an explicit interface address');
+  }
+  if (!isIP(value)) throw new TypeError('LAN proxy host must be an IP address');
+  return value;
+}
 
 /** Return the first non-empty value in an environment-like object. */
 export function firstEnv(env, names) {
@@ -351,11 +379,14 @@ export async function loadConfig(options = {}) {
     await writePrivate(paths.vapidPath, JSON.stringify(vapid, null, 2));
   }
 
-  const host = options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST;
+  const host = assertBridgeHost(options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST);
   const port = parsePort(options.port ?? firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port, DEFAULT_PORT);
   const lanProxyPort = parsePort(options.lanProxyPort ?? firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
-  const lanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
-  if (lanProxyHost && lanProxyPort === port) throw new Error('LAN proxy port must differ from bridge port');
+  const configuredLanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
+  const lanProxyHost = configuredLanProxyHost ? assertLanProxyHost(configuredLanProxyHost) : undefined;
+  if (lanProxyHost && (lanProxyPort < 1 || lanProxyPort === port)) {
+    throw new Error('LAN proxy port must be between 1 and 65535 and differ from bridge port');
+  }
   const socketPath = resolve(homePath(options.socketPath || firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath, firstEnv(env, ['HOME', 'USERPROFILE']) || homedir()));
   const allowedOrigin = options.allowedOrigin || firstEnv(env, ['HERDR_BRIDGE_ALLOWED_ORIGIN', 'BRIDGE_ALLOWED_ORIGIN']) || fileConfig.allowedOrigin || '';
   const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
@@ -430,11 +461,14 @@ export function loadConfigSync(options = {}) {
   if (resolvedVapid.generated && options.persistGenerated !== false) {
     writePrivateSync(paths.vapidPath, JSON.stringify(vapid, null, 2));
   }
-  const host = options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST;
+  const host = assertBridgeHost(options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST);
   const port = parsePort(options.port ?? firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port, DEFAULT_PORT);
   const lanProxyPort = parsePort(options.lanProxyPort ?? firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
-  const lanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
-  if (lanProxyHost && lanProxyPort === port) throw new Error('LAN proxy port must differ from bridge port');
+  const configuredLanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
+  const lanProxyHost = configuredLanProxyHost ? assertLanProxyHost(configuredLanProxyHost) : undefined;
+  if (lanProxyHost && (lanProxyPort < 1 || lanProxyPort === port)) {
+    throw new Error('LAN proxy port must be between 1 and 65535 and differ from bridge port');
+  }
   const home = firstEnv(env, ['HOME', 'USERPROFILE']) || homedir();
   const socketPath = resolve(homePath(options.socketPath || firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath, home));
   const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);

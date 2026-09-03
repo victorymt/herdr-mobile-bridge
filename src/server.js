@@ -20,7 +20,14 @@ import {
 } from './herdr-client.js';
 import { StateStore } from './state-store.js';
 import { PushManager } from './push.js';
-import { DEFAULT_LAN_PROXY_PORT } from './config.js';
+import {
+  assertBridgeHost,
+  assertLanProxyHost,
+  DEFAULT_HOST,
+  DEFAULT_LAN_PROXY_PORT,
+  DEFAULT_PORT,
+  parsePort,
+} from './config.js';
 
 const MAX_SSE_CLIENTS = 128;
 const MAX_SSE_PENDING = 512;
@@ -29,6 +36,7 @@ const MAX_CONTROL_IN_FLIGHT = 32;
 const MAX_STATIC_BYTES = 2 * 1024 * 1024;
 const MAX_DISCOVERY_QR_CODES = 8;
 const MAX_DISCOVERY_QR_URL_BYTES = 512;
+const MAX_DISCOVERY_HOSTS = 8;
 const PUBLIC_DIR = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -137,7 +145,15 @@ function collectLanAddresses(config = {}, interfaces = networkInterfaces()) {
       values.push(String(item.address));
     }
   }
-  return [...new Set(values)];
+  const unique = [...new Set(values)];
+  // Prefer IPv4 addresses because they do not require browser-specific IPv6
+  // scope syntax, then keep a small bounded set for a readable connection
+  // wizard when the host has many virtual interfaces.
+  return unique.sort((left, right) => {
+    const leftV6 = left.includes(':') ? 1 : 0;
+    const rightV6 = right.includes(':') ? 1 : 0;
+    return leftV6 - rightV6;
+  }).slice(0, MAX_DISCOVERY_HOSTS);
 }
 
 function authorityHost(host) {
@@ -317,7 +333,19 @@ function sseFrame(event) {
 
 export class BridgeServer {
   constructor(options = {}) {
-    this.config = options.config || {};
+    this.config = { ...(options.config || {}) };
+    // Callers embedding BridgeServer may inject a config object directly and
+    // therefore bypass loadConfig(). Re-validate listener boundaries here so
+    // an accidental wildcard host can never expose the authenticated Bridge.
+    this.config.host = assertBridgeHost(this.config.host || DEFAULT_HOST);
+    this.config.port = parsePort(this.config.port, DEFAULT_PORT);
+    if (this.config.lanProxyHost) {
+      this.config.lanProxyHost = assertLanProxyHost(this.config.lanProxyHost);
+      this.config.lanProxyPort = parsePort(this.config.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
+      if (this.config.lanProxyPort < 1 || this.config.lanProxyPort === this.config.port) {
+        throw new Error('LAN proxy port must be between 1 and 65535 and differ from bridge port');
+      }
+    }
     this.publicDir = resolve(options.publicDir || this.config.publicDir || PUBLIC_DIR);
     this.logger = options.logger || console;
     this.herdrClient = options.herdrClient;
@@ -404,7 +432,11 @@ export class BridgeServer {
         enabled: Boolean(lanHost),
         host: lanHost,
         port: lanHost ? lanPort : null,
-        running: Boolean(this.lanProxy?.server),
+        // LanProxy keeps a server reference while it is probing and clears
+        // its health flag as soon as the listener errors. Report the actual
+        // ready state to the connection guide instead of advertising a dead
+        // or still-starting port as usable.
+        running: Boolean(this.lanProxy?.server && this.lanProxy?.healthy === true),
         urls,
       },
       request: { secure },
@@ -483,22 +515,35 @@ export class BridgeServer {
     if (!this.herdrClient) throw new Error('herdrClient is required');
     const host = this.config.host || '127.0.0.1';
     const port = Number(this.config.port ?? 8787);
-    this.server = http.createServer((req, res) => {
+    const listener = http.createServer((req, res) => {
       this.handle(req, res).catch((error) => this.handleError(res, error));
     });
-    await new Promise((resolve, reject) => {
-      const onError = (error) => {
-        this.server?.off('listening', onListening);
-        reject(error);
-      };
-      const onListening = () => {
-        this.server?.off('error', onError);
-        resolve();
-      };
-      this.server.once('error', onError);
-      this.server.once('listening', onListening);
-      this.server.listen(port, host);
-    });
+    this.server = listener;
+    try {
+      await new Promise((resolve, reject) => {
+        const onError = (error) => {
+          listener.off('listening', onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          listener.off('error', onError);
+          resolve();
+        };
+        listener.once('error', onError);
+        listener.once('listening', onListening);
+        listener.listen(port, host);
+      });
+    } catch (error) {
+      // A failed listen leaves a created http.Server object behind. Close it
+      // before surfacing the error so a caller can retry without leaking a
+      // handle or retaining a stale runtime marker.
+      this.server = null;
+      try { await new Promise((resolve) => listener.close(() => resolve())); } catch { /* best effort */ }
+      this.started = false;
+      this.startedAt = null;
+      this.runtimeWritten = false;
+      throw error;
+    }
     this.started = true;
     this.startedAt = new Date();
     const address = this.address();

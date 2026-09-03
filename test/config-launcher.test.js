@@ -4,7 +4,7 @@ import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { loadConfig, loadConfigSync, resolvePaths } from '../src/config.js';
+import { assertBridgeHost, assertLanProxyHost, loadConfig, loadConfigSync, resolvePaths } from '../src/config.js';
 import { ensureBridge, processAlive } from '../src/launcher.js';
 
 test('config generates stable owner/secret/VAPID files in private dirs', async () => {
@@ -157,4 +157,21 @@ test('USERPROFILE and tilde paths resolve consistently', () => {
   const paths = resolvePaths({ USERPROFILE: '/home/profile' }, { configDir: '~/bridge-config', stateDir: '~/bridge-state' });
   assert.equal(paths.configDir, '/home/profile/bridge-config');
   assert.equal(paths.stateDir, '/home/profile/bridge-state');
+});
+
+test('LAN configuration keeps the bridge loopback-only and rejects wildcard proxy binds', async () => {
+  assert.equal(assertBridgeHost('127.0.0.1'), '127.0.0.1');
+  assert.equal(assertBridgeHost('::1'), '::1');
+  assert.throws(() => assertBridgeHost('0.0.0.0'), /loopback/);
+  assert.throws(() => assertBridgeHost('192.168.1.20'), /loopback/);
+  assert.equal(assertLanProxyHost('192.168.1.20'), '192.168.1.20');
+  assert.throws(() => assertLanProxyHost('0.0.0.0'), /explicit interface/);
+  assert.throws(() => assertLanProxyHost('lan.example'), /IP address/);
+
+  const root = await mkdtemp(join(tmpdir(), 'herdr-lan-config-'));
+  const base = { configDir: join(root, 'config'), stateDir: join(root, 'state'), token: 't', secret: 's', persistGenerated: false };
+  await assert.rejects(() => loadConfig({ ...base, host: '0.0.0.0' }), /loopback/);
+  assert.throws(() => loadConfigSync({ ...base, lanProxyHost: '0.0.0.0' }), /explicit interface/);
+  assert.throws(() => loadConfigSync({ ...base, lanProxyHost: '192.168.1.20', lanProxyPort: 0 }), /between 1 and 65535/);
+  await rm(root, { recursive: true, force: true });
 });
