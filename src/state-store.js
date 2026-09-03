@@ -177,7 +177,8 @@ export class StateStore {
     // store so subscriptions loaded from disk receive the same policy as new
     // registrations; custom relays must opt in explicitly.
     this.pushEndpointAllowlist = options.pushEndpointAllowlist ?? options.allowedPushEndpointHosts;
-    this.allowCustomEndpoints = options.allowCustomEndpoints === true;
+    this.allowCustomEndpoints = options.allowCustomEndpoints === true
+      || options.allowCustomPushEndpoints === true;
     this.clock = options.clock || (() => Date.now());
     this.maxSubscriptions = boundedLimit(options.maxSubscriptions, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTIONS);
     this.maxDedupEntries = boundedLimit(options.maxDedupEntries, MAX_DEDUP_ENTRIES, MAX_DEDUP_ENTRIES);

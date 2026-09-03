@@ -100,3 +100,15 @@ test('direct HTTP delivery rechecks endpoint policy before invoking fetch', asyn
   );
   assert.equal(called, false);
 });
+
+test('push manager accepts canonical configuration aliases when constructed directly', () => {
+  const manager = new PushManager({
+    allowPushRelay: true,
+    allowCustomPushEndpoints: true,
+    pushTimeoutMs: 17,
+    webPush: {},
+  });
+  assert.equal(manager.allowRelay, true);
+  assert.equal(manager.allowCustomEndpoints, true);
+  assert.equal(manager.timeoutMs, 17);
+});

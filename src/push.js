@@ -62,17 +62,19 @@ export class PushManager {
     this.vapid = options.vapid || {};
     this.fetch = options.fetch || globalThis.fetch;
     this.webPush = options.webPush || optionalWebPush;
-    this.allowRelay = options.allowRelay === true;
+    this.allowRelay = options.allowRelay === true || options.allowPushRelay === true;
     // Keep endpoint policy in the delivery adapter as well as StateStore:
     // embedders may inject a store with no validation, and persisted entries
     // can predate the stricter policy. Custom relays/providers must opt in.
     this.pushEndpointAllowlist = options.pushEndpointAllowlist
       ?? options.allowedPushEndpointHosts
       ?? this.store?.pushEndpointAllowlist;
-    this.allowCustomEndpoints = options.allowCustomEndpoints === true || this.store?.allowCustomEndpoints === true;
+    this.allowCustomEndpoints = options.allowCustomEndpoints === true
+      || options.allowCustomPushEndpoints === true
+      || this.store?.allowCustomEndpoints === true;
     this.sender = options.sender || ((subscription, payload) => this.sendHttp(subscription, payload));
     this.clock = options.clock || (() => Date.now());
-    const timeout = Number(options.timeoutMs);
+    const timeout = Number(options.timeoutMs ?? options.pushTimeoutMs);
     this.timeoutMs = Number.isFinite(timeout) && timeout > 0
       ? Math.min(Math.floor(timeout), MAX_PUSH_TIMEOUT_MS)
       : PUSH_TIMEOUT_MS;
