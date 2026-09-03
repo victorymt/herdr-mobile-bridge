@@ -218,6 +218,7 @@ test('stream replay queues events published during the replay snapshot', async (
   };
   let listener;
   server.eventBus = {
+    generation: 'generation-test',
     subscribe(callback) {
       listener = callback;
       return () => { listener = undefined; };
@@ -228,6 +229,7 @@ test('stream replay queues events published during the replay snapshot', async (
       listener(concurrent);
       return [replayed];
     },
+    latest() { return concurrent; },
   };
 
   const requestListeners = {};
@@ -251,6 +253,8 @@ test('stream replay queues events published during the replay snapshot', async (
     assert.deepEqual(events.slice(0, 2).map((event) => event.id), ['event-a', 'event-b']);
     assert.match(events[2].id, /^ready-/);
     assert.equal(events[2].event, 'ready');
+    assert.equal(events[2].context.generation, 'generation-test');
+    assert.equal(events[2].context.latest_seq, 2);
   } finally {
     requestListeners.close?.();
   }

@@ -120,8 +120,11 @@ function isPrivateLanAddress(address, family) {
       || (first === 192 && second === 168)
       || (first === 100 && second >= 64 && second <= 127);
   }
-  // ULA and link-local IPv6 addresses are reachable only on local networks.
-  return value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80:');
+  // ULA IPv6 addresses are usable in a browser URL. Link-local addresses
+  // require an interface scope (for example `%25wlan0`) that Node's generic
+  // networkInterfaces() result does not expose consistently, so omit them
+  // instead of presenting a URL that will fail on most phones.
+  return value.startsWith('fc') || value.startsWith('fd');
 }
 
 function collectLanAddresses(config = {}, interfaces = networkInterfaces()) {
@@ -219,7 +222,7 @@ function sanitiseSnapshot(snapshot, persistedStatuses = {}) {
 
 function sanitiseEvent(event) {
   const context = event?.context || {};
-  const clean = pick(context, ['pane_id', 'workspace_id', 'tab_id', 'agent', 'display_agent', 'title', 'agent_status', 'final_status', 'released', 'revision']);
+  const clean = pick(context, ['pane_id', 'workspace_id', 'tab_id', 'agent', 'display_agent', 'title', 'agent_status', 'final_status', 'released', 'revision', 'generation', 'latest_seq']);
   const labels = cleanLabels(context.state_labels);
   if (labels) clean.state_labels = labels;
   return {
@@ -962,7 +965,8 @@ export class BridgeServer {
       writeError(res, 503, 'stream_capacity', 'too many stream clients', { retry_after: 10 });
       return;
     }
-    const lastId = req.headers?.['last-event-id'] || url.searchParams.get('lastEventId');
+    const resetCursor = url.searchParams.get('reset') === '1' || url.searchParams.get('resync') === '1';
+    const lastId = resetCursor ? undefined : (req.headers?.['last-event-id'] || url.searchParams.get('lastEventId'));
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-store, must-revalidate',
@@ -1080,7 +1084,7 @@ export class BridgeServer {
     const generation = req.headers?.['x-herdr-event-generation'] || url.searchParams.get('generation');
     const replayInfo = this.eventBus.replaySince ? this.eventBus.replaySince(lastId, generation) : { events: this.eventBus.getSince(lastId), gap: false };
     const replay = replayInfo.events;
-    if (replayInfo.gap) write({ event: 'resync_required', context: { reason: 'replay_gap' }, received_at: new Date().toISOString() });
+    if (replayInfo.gap) write({ event: 'resync_required', context: { reason: 'replay_gap', generation: this.eventBus.generation }, received_at: new Date().toISOString() });
     const replayed = new Set(replay);
     for (const event of replay) write(event);
     replaying = false;
@@ -1102,14 +1106,19 @@ export class BridgeServer {
       if (!replayed.has(event)) write(event);
     }
     if (replayOverflow) {
-      write({ event: 'resync_required', context: { reason: 'replay_overflow' }, received_at: new Date().toISOString() });
+      write({ event: 'resync_required', context: { reason: 'replay_overflow', generation: this.eventBus.generation }, received_at: new Date().toISOString() });
     }
     flush();
     if (closed) return;
     // A readiness marker must not carry an SSE id: assigning seq=0 here would
     // reset the browser's Last-Event-ID after replay and cause every reconnect
     // to receive the entire bounded history again.
-    write({ id: `ready-${randomUUID()}`, event: 'ready', context: { connected: true }, received_at: new Date().toISOString() });
+    write({
+      id: `ready-${randomUUID()}`,
+      event: 'ready',
+      context: { connected: true, generation: this.eventBus.generation, latest_seq: this.eventBus.latest?.()?.seq ?? 0 },
+      received_at: new Date().toISOString(),
+    });
     heartbeat = setInterval(() => {
       if (closed || res.writableEnded) return cleanup();
       enqueue(`: heartbeat ${Date.now()}\n\n`);
