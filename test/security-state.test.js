@@ -47,6 +47,10 @@ test('state loading strips terminal output and unknown runtime fields', async ()
   await writeFile(join(root, 'runtime.json'), JSON.stringify({
     pid: 123,
     socket_path: '/tmp/herdr.sock',
+    lan_proxy_running: true,
+    lan_proxy_host: '192.168.1.20',
+    lan_proxy_port: 18787,
+    lan_proxy_error: 'temporary listener error',
     output: 'must not survive',
     pane_statuses: {
       'pane-1': {
@@ -61,6 +65,10 @@ test('state loading strips terminal output and unknown runtime fields', async ()
   const runtime = await store.getRuntime();
   const statuses = await store.listPaneStatuses();
   assert.equal(runtime.output, undefined);
+  assert.equal(runtime.lan_proxy_running, true);
+  assert.equal(runtime.lan_proxy_host, '192.168.1.20');
+  assert.equal(runtime.lan_proxy_port, 18787);
+  assert.equal(runtime.lan_proxy_error, 'temporary listener error');
   assert.equal(statuses['pane-1'].output, undefined);
   assert.equal(statuses['pane-1'].title, 'safe title');
   await rm(root, { recursive: true, force: true });

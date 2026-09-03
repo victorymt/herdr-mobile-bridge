@@ -366,6 +366,17 @@ function sanitizeRuntime(value) {
   if (processStartTime && /^\d+$/.test(processStartTime)) safe.process_start_time = processStartTime;
   const startedAt = boundedString(source.started_at, 64);
   if (startedAt) safe.started_at = startedAt;
+  // LAN proxy metadata is used by the launcher to distinguish a healthy
+  // bridge process from one whose optional forwarding listener has exited.
+  // Keep this explicit, bounded allowlist separate from credentials and never
+  // persist arbitrary proxy/runtime fields.
+  if (typeof source.lan_proxy_running === 'boolean') safe.lan_proxy_running = source.lan_proxy_running;
+  const lanProxyHost = boundedString(source.lan_proxy_host, 255);
+  if (lanProxyHost && lanProxyHost !== '0.0.0.0' && lanProxyHost !== '::') safe.lan_proxy_host = lanProxyHost;
+  const lanProxyPort = Number(source.lan_proxy_port);
+  if (Number.isInteger(lanProxyPort) && lanProxyPort >= 1 && lanProxyPort <= 65535) safe.lan_proxy_port = lanProxyPort;
+  const lanProxyError = boundedString(source.lan_proxy_error, 240);
+  if (lanProxyError) safe.lan_proxy_error = lanProxyError;
   return safe;
 }
 
