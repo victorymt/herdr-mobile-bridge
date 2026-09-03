@@ -1,7 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 
 import { LanProxy } from '../src/lan-proxy.js';
+
+class FakeConnection extends EventEmitter {
+  constructor() {
+    super();
+    queueMicrotask(() => this.emit('connect'));
+  }
+
+  write() {
+    queueMicrotask(() => this.emit('data', Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok')));
+  }
+
+  destroy() { this.emit('close'); }
+}
 
 class FakeServer {
   constructor() {
@@ -28,9 +42,7 @@ test('LAN proxy requires an explicit host and manages listener lifecycle', async
       servers.push(server);
       return server;
     },
-    createConnection() {
-      throw new Error('connection should not be opened during startup');
-    },
+    createConnection() { return new FakeConnection(); },
   };
   assert.throws(() => new LanProxy({ host: '0.0.0.0', net: fakeNet }), /explicit interface address/);
   assert.throws(() => new LanProxy({ host: '', net: fakeNet }), /explicit interface address/);
