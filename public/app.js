@@ -114,12 +114,20 @@ async function discoverBridge() {
     model.discoveryUrls = Array.isArray(data?.lan_proxy?.urls) ? data.lan_proxy.urls.filter((value) => /^https?:\/\//i.test(value)) : [];
     const info = data?.lan_proxy || {};
     const candidates = model.discoveryUrls;
+    const qrData = data?.qr || info.qr || {};
     status.textContent = info.running && candidates.length ? '服务已就绪，请选择手机可访问的地址。' : '暂未发现可用的局域网地址。';
     for (const value of candidates) {
       try { if (!/^https?:\/\//i.test(value)) continue; } catch { continue; }
       const row = document.createElement('div');
       row.className = 'discovery-url';
-      row.innerHTML = `<code>${escapeHtml(value)}</code><button type="button" class="secondary-button" data-copy-url="${escapeHtml(value)}">复制</button><span class="qr-fallback" aria-label="二维码不可用，请复制地址">请复制</span>`;
+      row.innerHTML = `<code>${escapeHtml(value)}</code><button type="button" class="secondary-button" data-copy-url="${escapeHtml(value)}">复制</button>`;
+      const qr = typeof qrData === 'string' ? qrData : qrData[value];
+      if (qr) {
+        const holder = document.createElement('span'); holder.className = 'discovery-qr'; holder.setAttribute('aria-label', '扫描二维码打开连接地址');
+        const parsed = new DOMParser().parseFromString(qr, 'image/svg+xml').documentElement;
+        if (parsed?.nodeName.toLowerCase() === 'svg') { parsed.setAttribute('role', 'img'); parsed.setAttribute('focusable', 'false'); holder.append(parsed); }
+        row.append(holder);
+      } else { const fallback = document.createElement('span'); fallback.className = 'qr-fallback'; fallback.textContent = '请复制'; row.append(fallback); }
       urls.append(row);
     }
     const secure = data?.request?.secure;
