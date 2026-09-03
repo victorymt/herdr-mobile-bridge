@@ -15,9 +15,10 @@ full Herdr socket API. Read the source before linking or installing it.
 - Linux
 - Herdr 0.7.0 or newer
 - Node.js 20 or newer and npm
-- An HTTPS reverse proxy reachable from the phone (Tailscale Serve is a good
-  fit for a single-user setup); a trusted LAN forward is sufficient when you
-  only need the dashboard and controls, not Web Push
+- A trusted LAN connection from the phone; use the included LAN proxy or a
+  manually started `socat` forward. An HTTPS reverse proxy may be bound to a
+  LAN/VPN interface when browser Web Push is required, but no public endpoint
+  is needed.
 
 The service binds to `127.0.0.1:8787` by default. Keep it on loopback and let
 the reverse proxy provide HTTPS; Web Push is disabled by browsers on an
@@ -54,12 +55,10 @@ node src/launcher.js token
 Use the printed token in the mobile browser's login form. The browser then
 asks for notification permission and registers a Web Push subscription.
 
-Expose the loopback service through your chosen HTTPS proxy. For example,
-configure Tailscale Serve to forward its HTTPS URL to
-`http://127.0.0.1:8787`, then open that HTTPS URL on the phone. The exact Serve
-command depends on the installed Tailscale version and tailnet policy (current
-clients commonly use `tailscale serve --bg http://127.0.0.1:8787`). Set the
-proxy origin explicitly when it rewrites the `Host` header:
+For optional HTTPS inside the LAN, configure a local reverse proxy (such as
+Caddy) to forward an HTTPS LAN address to `http://127.0.0.1:8787`. Keep its
+listener restricted to the LAN/VPN interface and do not publish it to the
+internet. Set the proxy origin explicitly when it rewrites the `Host` header:
 
 ```json
 {
@@ -181,8 +180,8 @@ curl -fsS http://127.0.0.1:8787/healthz
 `status` should report `running: true` and `socket_present: true`. A raw
 `socat` or TCP tunnel can expose the page to a trusted LAN, but it does not
 provide HTTPS; browsers will therefore disable Web Push on that origin. Use
-Tailscale Serve or another HTTPS reverse proxy when phone notifications are
-needed, and never forward the bridge port to the public internet.
+an HTTPS reverse proxy bound only to the LAN/VPN interface when notifications
+are needed; never forward the bridge port to the public internet.
 
 ## Development
 

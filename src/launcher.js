@@ -179,6 +179,8 @@ export function ensureBridge(options = {}) {
       HERDR_BRIDGE_HOST: config.host,
       HERDR_BRIDGE_PORT: config.port === undefined || config.port === null ? undefined : String(config.port),
       HERDR_SOCKET_PATH: config.socketPath,
+      HERDR_LAN_PROXY_HOST: config.lanProxyHost,
+      HERDR_LAN_PROXY_PORT: config.lanProxyHost ? String(config.lanProxyPort) : undefined,
     };
     for (const [key, value] of Object.entries(resolvedEnv)) {
       if (typeof value === 'string' && value.trim()) childEnv[key] = value;
@@ -248,6 +250,9 @@ export function statusBridge(options = {}) {
     url: `http://${config.host}:${runtime.port ?? config.port}`,
     socket_path: config.socketPath,
     socket_present: Boolean(config.socketPath && existsSync(config.socketPath)),
+    lan_proxy_host: config.lanProxyHost || null,
+    lan_proxy_port: config.lanProxyHost ? config.lanProxyPort : null,
+    lan_proxy_running: Boolean(running && config.lanProxyHost),
     config_dir: config.configDir,
     state_dir: config.stateDir,
     runtime,

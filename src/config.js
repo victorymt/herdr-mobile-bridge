@@ -378,6 +378,8 @@ export async function loadConfig(options = {}) {
     requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 5000,
     maxBodyBytes: Number.isFinite(maxBodyBytes) && maxBodyBytes > 0 ? maxBodyBytes : 1024 * 1024,
     cookieSecure: parseBoolean(options.cookieSecure ?? firstEnv(env, ['HERDR_BRIDGE_COOKIE_SECURE', 'BRIDGE_COOKIE_SECURE']) ?? fileConfig.cookieSecure, false),
+    healthDetails: parseBoolean(options.healthDetails ?? firstEnv(env, ['HERDR_BRIDGE_HEALTH_DETAILS', 'BRIDGE_HEALTH_DETAILS']) ?? fileConfig.healthDetails, false),
+    allowSseQueryToken: parseBoolean(options.allowSseQueryToken ?? firstEnv(env, ['HERDR_BRIDGE_ALLOW_SSE_QUERY_TOKEN', 'BRIDGE_ALLOW_SSE_QUERY_TOKEN']) ?? fileConfig.allowSseQueryToken, false),
     version: options.version || fileConfig.version || '0.1.0',
     vapidSubject,
   };
@@ -455,6 +457,8 @@ export function loadConfigSync(options = {}) {
     requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 5000,
     maxBodyBytes: Number.isFinite(maxBodyBytes) && maxBodyBytes > 0 ? maxBodyBytes : 1024 * 1024,
     cookieSecure: parseBoolean(options.cookieSecure ?? firstEnv(env, ['HERDR_BRIDGE_COOKIE_SECURE', 'BRIDGE_COOKIE_SECURE']) ?? fileConfig.cookieSecure, false),
+    healthDetails: parseBoolean(options.healthDetails ?? firstEnv(env, ['HERDR_BRIDGE_HEALTH_DETAILS', 'BRIDGE_HEALTH_DETAILS']) ?? fileConfig.healthDetails, false),
+    allowSseQueryToken: parseBoolean(options.allowSseQueryToken ?? firstEnv(env, ['HERDR_BRIDGE_ALLOW_SSE_QUERY_TOKEN', 'BRIDGE_ALLOW_SSE_QUERY_TOKEN']) ?? fileConfig.allowSseQueryToken, false),
     version: options.version || fileConfig.version || '0.1.0',
     vapidSubject,
   };

@@ -29,8 +29,22 @@ export async function startBridge(options = {}) {
   await server.start();
   if (server.config.lanProxyHost) {
     const proxy = new LanProxy({ host: server.config.lanProxyHost, port: server.config.lanProxyPort, targetPort: server.address().port });
-    await proxy.start();
+    try {
+      await proxy.start();
+    } catch (error) {
+      await server.close();
+      throw error;
+    }
     server.lanProxy = proxy;
+    // Consumers commonly call `server.close()` directly (including tests and
+    // embedders), so make proxy shutdown part of the Bridge lifecycle rather
+    // than requiring them to know about the optional LAN transport.
+    const closeBridge = server.close.bind(server);
+    server.close = async () => {
+      await proxy.close();
+      server.lanProxy = null;
+      return closeBridge();
+    };
   }
   return server;
 }
