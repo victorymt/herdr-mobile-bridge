@@ -135,7 +135,8 @@ test('state, output and focus routes use only the injected Herdr client', async 
   assert.equal(output.status, 200);
   const outputBody = await output.json();
   assert.equal(outputBody.output, 'line 12\n');
-  assert.equal(outputBody.read.revision, 7);
+  assert.equal(outputBody.read, undefined);
+  assert.equal(outputBody.result, undefined);
 
   const encodedSlash = await request(`/api/panes/${encodeURIComponent('workspace/pane?1')}/output?lines=4`);
   assert.equal(encodedSlash.status, 200);
@@ -145,10 +146,12 @@ test('state, output and focus routes use only the injected Herdr client', async 
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pane_id: 'w1:p1' }),
   });
   assert.equal(paneFocus.status, 200);
+  assert.deepEqual(await paneFocus.json(), { ok: true, accepted: true, pane_id: 'w1:p1' });
   const workspaceFocus = await request('/api/focus/workspace', {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workspace_id: 'w1' }),
   });
   assert.equal(workspaceFocus.status, 200);
+  assert.deepEqual(await workspaceFocus.json(), { ok: true, accepted: true, workspace_id: 'w1' });
   assert.deepEqual(fakeClient.calls.slice(-4), [
     ['read', 'w1:p1', 12], ['read', 'workspace/pane?1', 4], ['focusPane', 'w1:p1'], ['focusWorkspace', 'w1'],
   ]);

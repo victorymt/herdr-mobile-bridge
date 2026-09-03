@@ -500,18 +500,12 @@ export class BridgeServer {
     const pathname = url.pathname.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
 
     if (req.method === 'GET' && pathname === '/healthz') {
-      const runtime = this.store.initialized ? await this.store.getRuntime().catch(() => ({})) : {};
-      writeJson(res, 200, {
-        ok: true,
-        service: 'herdr-mobile-bridge',
-        version: this.config.version || '0.1.0',
-        uptime_seconds: Math.floor(process.uptime()),
-        pid: process.pid,
-        host: this.address().host,
-        port: this.address().port,
-        socket_present: Boolean(this.config.socketPath && existsSync(this.config.socketPath)),
-        started_at: runtime.started_at || this.startedAt?.toISOString() || null,
-      });
+      const health = { ok: true, service: 'herdr-mobile-bridge' };
+      if (this.config.healthDetails === true) {
+        const runtime = this.store.initialized ? await this.store.getRuntime().catch(() => ({})) : {};
+        Object.assign(health, { version: this.config.version || '0.1.0', uptime_seconds: Math.floor(process.uptime()), pid: process.pid, host: this.address().host, port: this.address().port, socket_present: Boolean(this.config.socketPath && existsSync(this.config.socketPath)), started_at: runtime.started_at || this.startedAt?.toISOString() || null });
+      }
+      writeJson(res, 200, health);
       return;
     }
 
@@ -709,14 +703,7 @@ export class BridgeServer {
     }
     const read = await this.herdrClient.readPane(paneId, lines);
     const text = typeof read === 'string' ? read : (read?.text ?? read?.output ?? '');
-    writeJson(res, 200, {
-      ok: true,
-      pane_id: paneId,
-      lines,
-      output: text,
-      text,
-      read: typeof read === 'object' ? read : { text },
-    });
+    writeJson(res, 200, { ok: true, pane_id: paneId, lines, output: text, text });
   }
 
   async handleFocusPane(req, res) {
@@ -733,7 +720,7 @@ export class BridgeServer {
     // short read-state cache make the UI appear to have ignored a successful
     // focus action.
     this.invalidateStateCache();
-    writeJson(res, 200, { ok: true, pane_id: paneId, result });
+    writeJson(res, 200, { ok: true, pane_id: paneId, accepted: true });
   }
 
   async handleFocusWorkspace(req, res) {
@@ -747,7 +734,7 @@ export class BridgeServer {
     if (!workspaceId) return writeError(res, 400, 'invalid_workspace_id', 'workspace_id is required');
     const result = await this.herdrClient.focusWorkspace(workspaceId);
     this.invalidateStateCache();
-    writeJson(res, 200, { ok: true, workspace_id: workspaceId, result });
+    writeJson(res, 200, { ok: true, workspace_id: workspaceId, accepted: true });
   }
 
   async handleAgentPrompt(req, res) {
