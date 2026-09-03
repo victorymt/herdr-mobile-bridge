@@ -4,6 +4,7 @@ import { basename, dirname } from 'node:path';
 import { loadConfig } from './config.js';
 import { HerdrSocketClient } from './herdr-client.js';
 import { BridgeServer } from './server.js';
+import { LanProxy } from './lan-proxy.js';
 
 export { BridgeServer } from './server.js';
 export { HerdrSocketClient, HerdrApiError, HerdrSocketError, ALLOWED_METHODS } from './herdr-client.js';
@@ -11,6 +12,7 @@ export { AuthManager } from './auth.js';
 export { EventBus, EventInputError, normalizeEventName, normalizeStatus } from './event-bus.js';
 export { PushManager, makePushPayload } from './push.js';
 export { StateStore } from './state-store.js';
+export { LanProxy } from './lan-proxy.js';
 export { loadConfig, loadConfigSync, resolvePaths } from './config.js';
 
 export async function createBridgeServer(options = {}) {
@@ -25,6 +27,11 @@ export async function createBridgeServer(options = {}) {
 export async function startBridge(options = {}) {
   const server = await createBridgeServer(options);
   await server.start();
+  if (server.config.lanProxyHost) {
+    const proxy = new LanProxy({ host: server.config.lanProxyHost, port: server.config.lanProxyPort, targetPort: server.address().port });
+    await proxy.start();
+    server.lanProxy = proxy;
+  }
   return server;
 }
 
@@ -49,6 +56,12 @@ function parseArgs(argv) {
     } else if (flag === '--state-dir' && next) {
       options.stateDir = next;
       if (inline === undefined) index += 1;
+    } else if (flag === '--lan-host' && next) {
+      options.lanProxyHost = next;
+      if (inline === undefined) index += 1;
+    } else if (flag === '--lan-port' && next) {
+      options.lanProxyPort = Number(next);
+      if (inline === undefined) index += 1;
     } else if (flag === '--print-token') {
       options.printToken = true;
     } else if (flag === '--help' || flag === '-h') {
@@ -61,7 +74,7 @@ function parseArgs(argv) {
 export async function main(argv = process.argv.slice(2)) {
   const cli = parseArgs(argv);
   if (cli.help) {
-    process.stdout.write('Usage: node src/index.js [--host HOST] [--port PORT] [--socket PATH] [--config-dir DIR] [--state-dir DIR]\n');
+    process.stdout.write('Usage: node src/index.js [--host HOST] [--port PORT] [--lan-host HOST] [--lan-port PORT] [--socket PATH] [--config-dir DIR] [--state-dir DIR]\n');
     return null;
   }
   const server = await startBridge(cli);
@@ -72,6 +85,7 @@ export async function main(argv = process.argv.slice(2)) {
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    await server.lanProxy?.close();
     await server.close();
   };
   process.once('SIGINT', () => { void stop().finally(() => process.exit(0)); });
@@ -86,4 +100,3 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     process.exitCode = 1;
   });
 }
-

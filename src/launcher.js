@@ -268,6 +268,8 @@ function parseArgs(argv) {
     else if ((flag === '--socket' || flag === '--socket-path') && next) { result.options.socketPath = next; if (inline === undefined) index += 1; }
     else if (flag === '--config-dir' && next) { result.options.configDir = next; if (inline === undefined) index += 1; }
     else if (flag === '--state-dir' && next) { result.options.stateDir = next; if (inline === undefined) index += 1; }
+    else if (flag === '--lan-host' && next) { result.options.lanProxyHost = next; if (inline === undefined) index += 1; }
+    else if (flag === '--lan-port' && next) { result.options.lanProxyPort = Number(next); if (inline === undefined) index += 1; }
     else if (flag === '--help' || flag === '-h') result.options.help = true;
   }
   if (positional[0]) result.command = positional[0].replace(/^--/, '');

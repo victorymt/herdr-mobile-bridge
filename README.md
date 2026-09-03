@@ -77,11 +77,11 @@ For a temporary, trusted-LAN control connection, `socat` can forward a
 specific host LAN address to the loopback gateway:
 
 ```bash
-socat TCP-LISTEN:8787,bind=192.168.1.20,reuseaddr,fork TCP:127.0.0.1:8787
+socat TCP-LISTEN:18787,bind=192.168.1.20,reuseaddr,fork TCP:127.0.0.1:8787
 ```
 
 Replace `192.168.1.20` with the computer's LAN address and open
-`http://192.168.1.20:8787` on the phone. This is a raw HTTP forward: use it
+`http://192.168.1.20:18787` on the phone. This is a raw HTTP forward: use it
 only on a trusted network, restrict the host firewall, stop it when finished,
 and use an HTTPS proxy instead when notifications are required.
 For this HTTP-only path, leave `cookieSecure` unset or set it to `false`. If
