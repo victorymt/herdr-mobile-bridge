@@ -25,6 +25,11 @@
   不持久化生成场景才传播凭据，并会清除旧别名。推送订阅的 `expirationTime` 现在仅接受有限的非负数标量。
 - 启动器注入配置对 `host`、`port`、`lanProxyHost`、`lanProxyPort` 和 `socketPath` 的显式空值统一
   fail-closed，与异步/同步配置加载及直接 `BridgeServer` 构造保持一致，不再静默套用默认监听值。
+- 输出接口支持显式的 `source`、`format` 和 `strip_ansi` 读取参数；移动端使用 Herdr 的
+  `recent_unwrapped` ANSI 快照，并通过安全的文本节点渲染器保留常见颜色、粗体、下划线等样式，
+  复制时自动还原为纯文本。光标移动、备用屏幕和其他未支持的终端控制会降级为可读文本。
+- Cookie 的 `Secure` 属性按实际请求协议生成；全局启用 `cookieSecure` 时，HTTPS 仍保持安全属性，
+  HTTP-only LAN 访问也不会在登录成功后因浏览器拒发 Cookie 而立即回到登录页。
 - README、README.zh-CN.md、socat 连接文档及 TODO 清单已同步更新；两份 README 均说明
   LAN CLI 参数的非持久性、`status` 的 loopback URL 与 detached 启动状态。
 - 已提供可选的 Caddy LAN HTTPS 示例和独立的真机/辅助技术验收清单。
@@ -34,7 +39,7 @@
 最近一次验证结果：
 
 ```text
-npm test                         128/128 通过
+npm test                         134/134 通过
 npm run check                    通过
 git diff --check                 通过
 npm audit --offline --omit=dev --audit-level=moderate  0 vulnerabilities

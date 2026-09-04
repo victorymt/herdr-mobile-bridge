@@ -14,6 +14,8 @@ export const ALLOWED_METHODS = Object.freeze([
 export const MAX_PROMPT_BYTES = 32 * 1024;
 export const MAX_INPUT_BYTES = 8 * 1024;
 export const MAX_INPUT_KEYS = 8;
+export const READ_FORMATS = Object.freeze(['text', 'ansi']);
+export const READ_SOURCES = Object.freeze(['visible', 'recent', 'recent_unwrapped', 'detection']);
 
 // Keep the browser bridge narrower than Herdr's general key-combo parser.
 // Printable input belongs in `text`; these keys cover the interaction controls
@@ -40,6 +42,8 @@ export const ALLOWED_INPUT_KEYS = Object.freeze([
 
 const ALLOWED_METHOD_SET = new Set(ALLOWED_METHODS);
 const ALLOWED_INPUT_KEY_SET = new Set(ALLOWED_INPUT_KEYS);
+const READ_FORMAT_SET = new Set(READ_FORMATS);
+const READ_SOURCE_SET = new Set(READ_SOURCES);
 
 export class HerdrApiError extends Error {
   constructor(code, message, response) {
@@ -119,6 +123,31 @@ function positiveLines(lines, fallback = 80) {
   return value;
 }
 
+function normaliseReadValue(value, allowed, name, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value !== 'string') throw new TypeError(`${name} must be a string`);
+  const normalized = value.trim().toLowerCase().replace(/-/g, '_');
+  if (!allowed.has(normalized)) throw new TypeError(`unsupported ${name}: ${value}`);
+  return normalized;
+}
+
+function parseBoolean(value, name, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  throw new TypeError(`${name} must be a boolean`);
+}
+
+function assertReadFormat(value, fallback = 'text') {
+  return normaliseReadValue(value, READ_FORMAT_SET, 'read format', fallback);
+}
+
+function assertReadSource(value, fallback = 'recent') {
+  return normaliseReadValue(value, READ_SOURCE_SET, 'read source', fallback);
+}
+
 function parseResponse(line) {
   let response;
   try {
@@ -192,13 +221,20 @@ export class HerdrSocketClient {
   async readPane(paneId, lines = 80, options = {}) {
     const id = assertPaneId(paneId);
     const count = positiveLines(lines);
+    const readOptions = options ?? {};
+    if (typeof readOptions !== 'object' || Array.isArray(readOptions)) {
+      throw new TypeError('read options must be an object');
+    }
+    const format = assertReadFormat(readOptions.format);
+    const source = assertReadSource(readOptions.source);
+    const stripAnsi = parseBoolean(readOptions.stripAnsi, 'stripAnsi', format !== 'ansi');
     const response = await this.request('pane.read', {
       pane_id: id,
-      source: options.source || 'recent',
+      source,
       lines: count,
-      format: options.format || 'text',
-      strip_ansi: options.stripAnsi !== false,
-    }, options);
+      format,
+      strip_ansi: stripAnsi,
+    }, readOptions);
     return response.result?.read ?? response.result;
   }
 
@@ -286,9 +322,12 @@ export {
   assertInputText,
   assertPaneId,
   assertPromptText,
+  assertReadFormat,
+  assertReadSource,
   assertSocketPath,
   assertWorkspaceId,
   normaliseInputKeys,
+  parseBoolean,
   parseResponse,
   positiveLines,
 };

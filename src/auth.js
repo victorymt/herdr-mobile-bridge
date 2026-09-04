@@ -128,7 +128,7 @@ export class AuthManager {
     return { ok: false, reason: 'invalid_credentials' };
   }
 
-  sessionCookie(session, maxAgeSeconds = Math.floor(this.ttlMs / 1000)) {
+  sessionCookie(session, maxAgeSeconds = Math.floor(this.ttlMs / 1000), secure = this.cookieSecure) {
     const attributes = [
       `${this.cookieName}=${encodeURIComponent(session)}`,
       'Path=/',
@@ -136,22 +136,22 @@ export class AuthManager {
       'SameSite=Strict',
       `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
     ];
-    if (this.cookieSecure) attributes.push('Secure');
+    if (secure) attributes.push('Secure');
     return attributes.join('; ');
   }
 
-  csrfCookie(csrf, maxAgeSeconds = Math.floor(this.ttlMs / 1000)) {
+  csrfCookie(csrf, maxAgeSeconds = Math.floor(this.ttlMs / 1000), secure = this.cookieSecure) {
     const attributes = [
       `${this.csrfCookieName}=${encodeURIComponent(String(csrf || ''))}`,
       'Path=/',
       'SameSite=Strict',
       `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
     ];
-    if (this.cookieSecure) attributes.push('Secure');
+    if (secure) attributes.push('Secure');
     return attributes.join('; ');
   }
 
-  clearCookie() {
+  clearCookie(secure = this.cookieSecure) {
     const attributes = [
       `${this.cookieName}=`,
       'Path=/',
@@ -159,18 +159,18 @@ export class AuthManager {
       'SameSite=Strict',
       'Max-Age=0',
     ];
-    if (this.cookieSecure) attributes.push('Secure');
+    if (secure) attributes.push('Secure');
     return attributes.join('; ');
   }
 
-  clearCsrfCookie() {
+  clearCsrfCookie(secure = this.cookieSecure) {
     const attributes = [
       `${this.csrfCookieName}=`,
       'Path=/',
       'SameSite=Strict',
       'Max-Age=0',
     ];
-    if (this.cookieSecure) attributes.push('Secure');
+    if (secure) attributes.push('Secure');
     return attributes.join('; ');
   }
 }

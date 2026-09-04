@@ -13,7 +13,14 @@ function authorityHost(host) {
 }
 
 export { BridgeServer } from './server.js';
-export { HerdrSocketClient, HerdrApiError, HerdrSocketError, ALLOWED_METHODS } from './herdr-client.js';
+export {
+  HerdrSocketClient,
+  HerdrApiError,
+  HerdrSocketError,
+  ALLOWED_METHODS,
+  READ_FORMATS,
+  READ_SOURCES,
+} from './herdr-client.js';
 export { AuthManager } from './auth.js';
 export { EventBus, EventInputError, normalizeEventName, normalizeStatus } from './event-bus.js';
 export { PushManager, makePushPayload } from './push.js';

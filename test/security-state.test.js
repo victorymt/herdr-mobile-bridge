@@ -16,6 +16,15 @@ test('internal bridge secret is not accepted as a browser login token', () => {
   assert.equal(new AuthManager().verifyOwnerToken(''), false);
 });
 
+test('secure cookie policy can be overridden for an explicitly detected HTTP request', () => {
+  const auth = new AuthManager({ token: 'owner-token', cookieSecure: true, random: () => 'session' });
+  assert.match(auth.sessionCookie('session'), /; Secure$/);
+  assert.doesNotMatch(auth.sessionCookie('session', undefined, false), /; Secure$/);
+  assert.match(auth.csrfCookie('csrf', undefined, true), /; Secure$/);
+  assert.doesNotMatch(auth.clearCookie(false), /; Secure$/);
+  assert.doesNotMatch(auth.clearCsrfCookie(false), /; Secure$/);
+});
+
 test('pane status fields can be explicitly cleared without losing unrelated metadata', async () => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-state-clear-'));
   const store = new StateStore({ stateDir: root });

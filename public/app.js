@@ -1,4 +1,5 @@
 import { parseDeepLink } from './deep-link.js';
+import { ansiToText, renderAnsi } from './ansi.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -9,6 +10,7 @@ const model = {
   panes: [],
   workspaces: [],
   output: '',
+  outputPlain: '',
   // The output buffer is shared by the desktop output view and the attention
   // action panel. Keep its source pane explicit so switching views cannot
   // accidentally present one pane's log as another pane's notification.
@@ -428,6 +430,7 @@ function renderStatusGrid(data) {
 
 function renderOutput() {
   const text = model.output || '';
+  const styledOutput = Boolean(text) && !model.outputLoading && !model.outputError;
   const message = model.outputLoading
     ? '正在读取…'
     : model.outputError || text || '选择一个窗格后读取最近输出。';
@@ -443,21 +446,22 @@ function renderOutput() {
       ? node.scrollHeight - node.scrollTop - node.clientHeight <= OUTPUT_BOTTOM_THRESHOLD
       : remembered;
   };
-  const put = (node, value, forceBottom = false) => {
+  const put = (node, value, forceBottom = false, styled = false) => {
     if (!node) return;
     const shouldScroll = forceBottom || stick(node);
-    node.textContent = value;
+    if (styled) renderAnsi(node, value);
+    else node.textContent = value;
     if (shouldScroll) node.scrollTop = node.scrollHeight;
   };
-  put(preview, model.outputLoading ? '正在读取…' : (text || '暂无输出'));
-  put(consoleNode, message);
+  put(preview, model.outputLoading ? '正在读取…' : (text || '暂无输出'), false, styledOutput);
+  put(consoleNode, message, false, styledOutput && message === text);
   if (attentionConsole) {
     const attentionMessage = !attentionOutputMatches
       ? '正在读取通知目标输出…'
       : message === '选择一个窗格后读取最近输出。'
       ? (model.attention?.pane ? '暂无输出' : '正在等待通知目标…')
       : message;
-    put(attentionConsole, attentionMessage);
+    put(attentionConsole, attentionMessage, false, styledOutput && attentionOutputMatches && attentionMessage === text);
   }
   const attentionError = $('attention-error');
   if (attentionError) {
@@ -472,7 +476,7 @@ function renderOutput() {
     : model.outputError
       ? `输出读取失败：${model.outputError}`
       : text
-        ? `已加载 ${text.split('\n').filter(Boolean).length} 行输出`
+        ? `已加载 ${ansiToText(text).split('\n').filter(Boolean).length} 行输出`
         : '当前没有输出';
   if (announcement !== model.lastOutputAnnouncement) {
     model.lastOutputAnnouncement = announcement;
@@ -680,6 +684,7 @@ async function refreshState({ quiet = false } = {}) {
         model.outputRequest += 1;
         model.outputLoading = false;
         model.output = '';
+        model.outputPlain = '';
         model.outputPaneId = '';
         model.outputError = '';
         renderOutput();
@@ -877,6 +882,7 @@ async function logout() {
   model.outputRequest += 1;
   model.outputLoading = false;
   model.output = '';
+  model.outputPlain = '';
   model.outputPaneId = '';
   model.outputError = '';
   renderOutput();
@@ -924,6 +930,7 @@ async function loadPaneOutput(id = model.selectedPane, { view = 'output', preser
   if (!id) {
     model.outputPaneId = '';
     model.output = '';
+    model.outputPlain = '';
     if (view === 'attention') {
       model.outputLoading = false;
       model.outputError = '通知没有提供可读取的窗格。';
@@ -934,6 +941,7 @@ async function loadPaneOutput(id = model.selectedPane, { view = 'output', preser
   if (!model.connected) {
     model.outputPaneId = id;
     model.output = '';
+    model.outputPlain = '';
     model.outputLoading = false;
     model.outputError = '当前离线，恢复连接后才能读取输出。';
     renderOutput();
@@ -946,6 +954,7 @@ async function loadPaneOutput(id = model.selectedPane, { view = 'output', preser
   const keepOutput = preserve || (previousPane === id && Boolean(model.output));
   if (!keepOutput) {
     model.output = '';
+    model.outputPlain = '';
     document.querySelectorAll('.output-console, .output-preview').forEach((node) => outputScrollState.set(node, true));
   }
   model.outputError = '';
@@ -955,9 +964,10 @@ async function loadPaneOutput(id = model.selectedPane, { view = 'output', preser
   renderAttention();
   renderOutput();
   try {
-    const data = await api(`/api/panes/${encodeURIComponent(id)}/output?lines=80`);
+    const data = await api(`/api/panes/${encodeURIComponent(id)}/output?lines=80&source=recent_unwrapped&format=ansi&strip_ansi=0`);
     if (requestId !== model.outputRequest) return false;
     model.output = String(data.output ?? data.text ?? data.read?.text ?? '');
+    model.outputPlain = String(data.plain_text ?? ansiToText(model.output));
     model.outputError = '';
     model.outputLoading = false;
     renderOutput();
@@ -1139,6 +1149,7 @@ function enterAttentionTarget() {
 
   model.selectedPane = target;
   model.output = '';
+  model.outputPlain = '';
   model.outputError = '';
   model.outputLoading = false;
   document.querySelectorAll('.output-console, .output-preview').forEach((node) => outputScrollState.set(node, true));
@@ -1416,6 +1427,7 @@ function applyDeepLink() {
     // all pane controls disabled until the user explicitly chooses a pane.
     model.selectedPane = link.pane || '';
     model.output = '';
+    model.outputPlain = '';
     model.outputPaneId = '';
     model.outputError = link.pane ? '' : '通知没有提供可读取的窗格。';
     renderPaneSelect();
@@ -1518,7 +1530,7 @@ async function copyOutput() {
     showToast('正在读取通知目标输出，请稍候');
     return;
   }
-  const text = String(model.output || '');
+  const text = String(model.outputPlain || ansiToText(model.output || ''));
   if (!text) { showToast('当前没有可复制的输出'); return; }
   try {
     if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
@@ -1592,6 +1604,7 @@ $('control-pane').addEventListener('change', (event) => {
 });
 $('clear-output').addEventListener('click', () => {
   model.output = '';
+  model.outputPlain = '';
   model.outputPaneId = model.selectedPane || '';
   model.outputError = '';
   renderOutput();

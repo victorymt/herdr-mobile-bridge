@@ -11,6 +11,7 @@ test('Herdr socket client round trips the allowlisted read, focus, and control m
   const dir = await mkdtemp(join(tmpdir(), 'herdr-socket-test-'));
   const socketPath = join(dir, 'herdr.sock');
   const methods = [];
+  const reads = [];
   const server = net.createServer((socket) => {
     let buffer = '';
     socket.on('data', (chunk) => {
@@ -21,7 +22,10 @@ test('Herdr socket client round trips the allowlisted read, focus, and control m
       methods.push(request.method);
       let result;
       if (request.method === 'session.snapshot') result = { type: 'session_snapshot', snapshot: { panes: [] } };
-      else if (request.method === 'pane.read') result = { type: 'pane_read', read: { pane_id: request.params.pane_id, text: 'ok' } };
+      else if (request.method === 'pane.read') {
+        reads.push(request.params);
+        result = { type: 'pane_read', read: { pane_id: request.params.pane_id, text: 'ok' } };
+      }
       else if (request.method === 'agent.prompt') result = { type: 'agent_prompted', agent: { pane_id: request.params.target } };
       else if (request.method === 'pane.send_input') result = { type: 'ok' };
       else result = { type: request.method === 'pane.focus' ? 'pane_info' : 'workspace_info' };
@@ -32,11 +36,23 @@ test('Herdr socket client round trips the allowlisted read, focus, and control m
   const client = new HerdrSocketClient({ socketPath, timeoutMs: 1000 });
   assert.deepEqual(await client.snapshot(), { panes: [] });
   assert.equal((await client.readPane('w1:p1', 5)).text, 'ok');
+  assert.deepEqual(reads[0], {
+    pane_id: 'w1:p1', source: 'recent', lines: 5, format: 'text', strip_ansi: true,
+  });
+  assert.equal((await client.readPane('w1:p1', 6, {
+    source: 'recent-unwrapped', format: 'ansi', stripAnsi: false,
+  })).text, 'ok');
+  assert.deepEqual(reads[1], {
+    pane_id: 'w1:p1', source: 'recent_unwrapped', lines: 6, format: 'ansi', strip_ansi: false,
+  });
+  await assert.rejects(() => client.readPane('w1:p1', 6, { format: 'html' }), /unsupported read format/);
+  await assert.rejects(() => client.readPane('w1:p1', 6, { stripAnsi: 'maybe' }), /stripAnsi must be a boolean/);
+  await assert.rejects(() => client.readPane('w1:p1', 6, []), /read options must be an object/);
   await client.focusPane('w1:p1');
   await client.focusWorkspace('w1');
   await client.promptAgent('w1:p1', 'check this');
   await client.sendPaneInput('w1:p1', { text: 'yes', keys: ['enter'] });
-  assert.deepEqual(methods, ['session.snapshot', 'pane.read', 'pane.focus', 'workspace.focus', 'agent.prompt', 'pane.send_input']);
+  assert.deepEqual(methods, ['session.snapshot', 'pane.read', 'pane.read', 'pane.focus', 'workspace.focus', 'agent.prompt', 'pane.send_input']);
   await assert.rejects(() => client.request('server.stop', {}), (error) => error instanceof HerdrApiError && error.code === 'method_not_allowed');
   await new Promise((resolve) => server.close(resolve));
   await rm(dir, { recursive: true, force: true });

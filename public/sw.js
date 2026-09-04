@@ -1,8 +1,8 @@
 // Bump the shell cache whenever the dashboard assets change.  The service
 // worker is cache-first for the app shell, so keeping the old name would leave
 // existing phones serving stale JavaScript (including missing control views).
-const CACHE_NAME = 'herdr-mobile-v22';
-const APP_SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/deep-link.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
+const CACHE_NAME = 'herdr-mobile-v23';
+const APP_SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/ansi.js', '/deep-link.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   // Keep an updated worker in the waiting phase until the open page gives

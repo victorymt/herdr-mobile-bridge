@@ -43,6 +43,18 @@ test('attention output remains scoped to the notification pane', async () => {
   assert.match(app, /model\.activeView === 'attention' && model\.attention\?\.pane && model\.outputPaneId !== model\.attention\.pane/);
 });
 
+test('output view requests ANSI snapshots and keeps clipboard output plain', async () => {
+  const [app, sw] = await Promise.all([
+    readFile(join(ROOT, 'public', 'app.js'), 'utf8'),
+    readFile(join(ROOT, 'public', 'sw.js'), 'utf8'),
+  ]);
+  assert.match(app, /from '\.\/ansi\.js'/);
+  assert.match(app, /source=recent_unwrapped&format=ansi&strip_ansi=0/);
+  assert.match(app, /renderAnsi\(node, value\)/);
+  assert.match(app, /ansiToText\(model\.output/);
+  assert.match(sw, /'\/ansi\.js'/);
+});
+
 test('short mobile screens schedule overlap protection after layout and viewport changes', async () => {
   const app = await readFile(join(ROOT, 'public', 'app.js'), 'utf8');
   assert.match(app, /function protectMobileNavOverlap\(view = model\.activeView\)/);

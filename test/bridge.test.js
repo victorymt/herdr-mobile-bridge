@@ -17,6 +17,7 @@ let pushes;
 
 const fakeClient = {
   calls: [],
+  readOptions: [],
   async snapshot() {
     this.calls.push(['snapshot']);
     return {
@@ -28,9 +29,14 @@ const fakeClient = {
       panes: [],
     };
   },
-  async readPane(paneId, lines) {
+  async readPane(paneId, lines, options) {
     this.calls.push(['read', paneId, lines]);
-    return { pane_id: paneId, text: `line ${lines}\n`, revision: 7 };
+    this.readOptions.push(options || {});
+    return {
+      pane_id: paneId,
+      text: options?.format === 'ansi' ? `\u001b[1;36mline ${lines}\u001b[0m\n` : `line ${lines}\n`,
+      revision: 7,
+    };
   },
   async focusPane(paneId) {
     this.calls.push(['focusPane', paneId]);
@@ -310,6 +316,64 @@ test('state, output and focus routes use only the injected Herdr client', async 
   assert.deepEqual(fakeClient.calls.slice(-4), [
     ['read', 'w1:p1', 12], ['read', 'workspace/pane?1', 4], ['focusPane', 'w1:p1'], ['focusWorkspace', 'w1'],
   ]);
+
+  const ansi = await request('/api/panes/w1%3Ap1/output?lines=7&source=recent-unwrapped&format=ansi&strip_ansi=0');
+  assert.equal(ansi.status, 200);
+  const ansiBody = await ansi.json();
+  assert.deepEqual(fakeClient.readOptions.at(-1), {
+    source: 'recent_unwrapped', format: 'ansi', stripAnsi: false,
+  });
+  assert.equal(ansiBody.source, 'recent_unwrapped');
+  assert.equal(ansiBody.format, 'ansi');
+  assert.equal(ansiBody.strip_ansi, false);
+  assert.match(ansiBody.output, /\u001b\[1;36mline 7\u001b\[0m/);
+  assert.equal(ansiBody.revision, 7);
+  assert.equal(ansiBody.read, undefined);
+
+  for (const query of ['format=html', 'source=unknown', 'strip_ansi=maybe']) {
+    const invalid = await request(`/api/panes/w1%3Ap1/output?${query}`);
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error.code, 'invalid_read_options');
+  }
+});
+
+test('HTTPS-only cookie configuration does not strand HTTP browser sessions', async () => {
+  const secureRoot = await mkdtemp(join(tmpdir(), 'herdr-bridge-cookie-'));
+  const secureServer = new BridgeServer({
+    config: {
+      host: '127.0.0.1',
+      port: 0,
+      stateDir: join(secureRoot, 'state'),
+      runtimePath: join(secureRoot, 'state', 'runtime.json'),
+      subscriptionsPath: join(secureRoot, 'state', 'subscriptions.json'),
+      dedupPath: join(secureRoot, 'state', 'dedup.json'),
+      socketPath: '/tmp/herdr-cookie-test.sock',
+      token: 'owner-token',
+      secret: 'hook-secret',
+      allowedOrigin: '*',
+      cookieSecure: true,
+    },
+    herdrClient: fakeClient,
+    rateLimiter: false,
+    webPush: {},
+  });
+  try {
+    await secureServer.start();
+    const secureBase = `http://127.0.0.1:${secureServer.address().port}`;
+    const login = await fetch(`${secureBase}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'owner-token' }),
+    });
+    assert.equal(login.status, 200);
+    assert.doesNotMatch(login.headers.get('set-cookie') || '', /; Secure(?:;|$)/);
+    const cookies = collectCookies(login.headers.get('set-cookie'));
+    const state = await fetch(`${secureBase}/api/state`, { headers: { cookie: cookies } });
+    assert.equal(state.status, 200);
+  } finally {
+    await secureServer.close();
+    await rm(secureRoot, { recursive: true, force: true });
+  }
 });
 
 test('internal events require the hook secret, persist statuses and push only terminal states once', async () => {

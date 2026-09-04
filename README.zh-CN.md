@@ -44,12 +44,24 @@ Herdr 启动时，插件的启动钩子会幂等地启动本地网关。钩子�
 
 ```bash
 node src/launcher.js setup
-node src/launcher.js status
 node src/launcher.js token
+node src/launcher.js ensure
+node src/launcher.js status
 ```
 
-在手机浏览器的登录表单中输入打印出的令牌。登录后，可以从通知控件申请通知权限并注册
-Web Push 订阅。
+`setup` 只负责生成或确认配置和令牌；`ensure` 才会启动 Bridge。浏览器在电脑上访问
+`status` 输出的 `url`，默认是 `http://127.0.0.1:8787`。只有当 `status` 显示
+`running:true` 时服务才真正就绪；`ensure` 输出的 `started:true` 仅表示已创建后台子进程，
+不代表监听器已经启动。若看到 `running:false`，先不要在浏览器输入令牌，应检查端口冲突或
+运行日志，并重复执行 `status`。
+
+在电脑浏览器中打开 `http://127.0.0.1:8787`，在登录表单中输入打印出的令牌。这个地址只能
+在运行 Bridge 的电脑上使用；手机不能用电脑的 `127.0.0.1`。登录后，可以从通知控件申请
+通知权限并注册 Web Push 订阅。
+
+`status` 中的 `lan_proxy_host` 如果是 `null`，表示没有启动局域网代理。此时不要打开
+`http://电脑局域网地址:18787`；只有用 `--lan-host`/`--lan-port` 启动代理或把它们写入
+`bridge.json` 后，该地址才可用。
 
 如需在局域网内使用 HTTPS，可以配置本地反向代理（例如 Caddy），把 LAN 地址上的 HTTPS
 请求转发到 `http://127.0.0.1:8787`。监听器只能绑定到 LAN/VPN 网卡，不要发布到互联网。
@@ -82,9 +94,10 @@ socat TCP-LISTEN:18787,bind=192.168.1.20,reuseaddr,fork TCP:127.0.0.1:8787
 HTTP 是明文传输，能够观察局域网流量的设备可能读取 Bridge 令牌、会话 Cookie，以及（如果在
 其他代理中启用）Basic Auth 凭据。`lanProxyAllowedCidrs` 只对内置 Node proxy 生效；`socat`
 不会执行该 ACL，因此必须在主机防火墙或受信反向代理中重复限制来源。
-对于这条纯 HTTP 链路，请不要设置 `cookieSecure`，或将其设为 `false`。如果显式配置了
-`allowedOrigin`，请加入准确的 LAN 来源（例如 `http://192.168.1.20`）；也可以删除该覆盖项，
-让同主机访问使用默认值。
+对于这条纯 HTTP 链路，请不要设置 `cookieSecure`，或将其设为 `false`。即使全局启用了该选项，
+Bridge 也只会在实际 HTTPS 请求中添加 `Secure`，不会出现 HTTP 登录成功后会话立即失效的情况。
+如果显式配置了 `allowedOrigin`，请加入准确的 LAN 来源（例如 `http://192.168.1.20`）；也可以
+删除该覆盖项，让同主机访问使用默认值。
 
 启动器也可以直接管理内置 LAN proxy，不必另起一个 `socat` 进程。它会把 LAN 监听器转发到
 回环网关，而网关负责代理健康检查和生命周期清理：
@@ -168,6 +181,12 @@ ACL 或这四个安全整数如果为空或非法，启动会被拒绝。
 - 通过 Herdr 的 `agent.prompt` API 发送有长度限制的任务；
 - 通过 `pane.send_input` 发送受长度限制的文本，并使用少量允许的交互按键（Enter、Escape、
   Tab、方向键、Backspace 以及指定的控制键）。
+
+输出页面会请求 Herdr 的 `recent_unwrapped` 快照，并使用 `format=ansi` 保留常见的终端颜色、
+粗体、下划线等样式，在浏览器中安全渲染。复制输出时始终得到不含转义序列的纯文本。
+为保持兼容，输出接口默认仍返回纯文本；需要样式的调用方可使用
+`source=recent_unwrapped&format=ansi&strip_ansi=0`。复杂的光标移动和备用屏幕控制会降级为可读
+文本，不模拟完整终端。
 
 桥接服务不会暴露通用的 socket 方法代理、关闭窗格/工作区的操作，也不会持久化终端输出。
 提交任务前浏览器会要求确认，每个修改操作都需要已认证会话的 CSRF 令牌。推送消息只包含

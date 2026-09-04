@@ -223,7 +223,8 @@ node src/launcher.js stop
 ```
 
 - [ ] 在主机防火墙放行 `18787/tcp` 仅给家庭/个人 LAN 网段（需按操作系统实际配置并验证）。
-- [ ] 若 `cookieSecure` 为 `true`，LAN HTTP 登录会失败；HTTP-only LAN 路径应保持未设置或设为 `false`。
+- [x] 若 `cookieSecure` 为 `true`，服务端会根据实际请求协议生成 Cookie：HTTPS 仍使用 `Secure`，
+  HTTP-only LAN 访问不会因静态 `Secure` 属性而在登录后立刻失效；仍建议 HTTP-only 路径不要启用该选项。
 - [ ] 若显式设置 `allowedOrigin`，必须包含精确的 LAN origin（例如 `http://192.168.1.20`），否则应移除该覆盖值以使用同源访问。
 
 真机、辅助技术和防火墙验收可按 [`docs/lan-acceptance-checklist.md`](../docs/lan-acceptance-checklist.md)

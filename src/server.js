@@ -16,7 +16,10 @@ import {
   HerdrSocketError,
   assertInputText,
   assertPromptText,
+  assertReadFormat,
+  assertReadSource,
   normaliseInputKeys,
+  parseBoolean,
   positiveLines,
 } from './herdr-client.js';
 import { StateStore } from './state-store.js';
@@ -717,8 +720,7 @@ export class BridgeServer {
     const urls = hosts.map((host) => lanUrl(host, lanPort));
     const configuredUrl = lanHost ? lanUrl(lanHost, lanPort) : null;
     if (configuredUrl && !urls.includes(configuredUrl)) urls.unshift(configuredUrl);
-    const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
-    const secure = Boolean(req?.socket?.encrypted) || (forwardedProto === 'https' && this.requestOriginAllowed(req));
+    const secure = this.requestIsSecure(req);
     return {
       ok: true,
       service: 'herdr-mobile-bridge',
@@ -948,6 +950,19 @@ export class BridgeServer {
     return originAllowed(this.config.allowedOrigin, req.headers?.origin, req.headers?.host);
   }
 
+  requestIsSecure(req) {
+    const forwardedProto = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+    return Boolean(req?.socket?.encrypted) || (forwardedProto === 'https' && this.requestOriginAllowed(req));
+  }
+
+  cookieSecureForRequest(req) {
+    // A static Secure cookie on a plain HTTP LAN URL is accepted by the login
+    // response but withheld from the next HTTP request by browsers. Only add
+    // Secure when it is both configured and supported by the actual request
+    // scheme, including a trusted HTTPS reverse proxy hop.
+    return this.config.cookieSecure === true && this.requestIsSecure(req);
+  }
+
   requireMutationSecurity(req, url, authResult) {
     if (!this.requestOriginAllowed(req)) {
       const error = new Error('request Origin is not allowed');
@@ -1079,7 +1094,10 @@ export class BridgeServer {
       if (req.method !== 'POST') return this.methodNotAllowed(res, ['POST']);
       if (rejectUnexpectedBody(req, res)) return;
       this.auth.logout(req);
-      writeJson(res, 200, { ok: true, logged_out: true }, { 'set-cookie': [this.auth.clearCookie(), this.auth.clearCsrfCookie?.() || ''] });
+      const secureCookies = this.cookieSecureForRequest(req);
+      writeJson(res, 200, { ok: true, logged_out: true }, {
+        'set-cookie': [this.auth.clearCookie(secureCookies), this.auth.clearCsrfCookie?.(secureCookies) || ''],
+      });
       return;
     }
 
@@ -1182,11 +1200,17 @@ export class BridgeServer {
     }
     const result = this.auth.login(body);
     if (!result.ok) return writeError(res, 401, 'invalid_credentials', 'invalid bridge token');
+    const secureCookies = this.cookieSecureForRequest(req);
     writeJson(res, 200, {
       ok: true,
       expires_at: new Date(result.expiresAt).toISOString(),
       expires_in: Math.max(0, Math.floor((result.expiresAt - Date.now()) / 1000)),
-    }, { 'set-cookie': [this.auth.sessionCookie(result.session), this.auth.csrfCookie?.(result.csrf) || ''] });
+    }, {
+      'set-cookie': [
+        this.auth.sessionCookie(result.session, undefined, secureCookies),
+        this.auth.csrfCookie?.(result.csrf, undefined, secureCookies) || '',
+      ],
+    });
   }
 
   rateLimitDescriptors(req, authResult, profile = 'api') {
@@ -1281,14 +1305,45 @@ export class BridgeServer {
     const paneId = decodeSegment(encodedPaneId);
     if (!paneId) return writeError(res, 400, 'invalid_pane_id', 'invalid pane id');
     let lines;
+    let source;
+    let format;
+    let stripAnsi;
     try {
       lines = positiveLines(url.searchParams.get('lines') || 80, 80);
+      source = assertReadSource(url.searchParams.get('source'), 'recent');
+      format = assertReadFormat(url.searchParams.get('format'), 'text');
+      stripAnsi = parseBoolean(
+        url.searchParams.get('strip_ansi'),
+        'strip_ansi',
+        format === 'ansi' ? false : true,
+      );
     } catch (error) {
-      return writeError(res, 400, 'invalid_lines', error.message);
+      const code = String(error?.message || '').startsWith('lines ') ? 'invalid_lines' : 'invalid_read_options';
+      return writeError(res, 400, code, error.message);
     }
-    const read = await this.herdrClient.readPane(paneId, lines);
-    const text = typeof read === 'string' ? read : (read?.text ?? read?.output ?? '');
-    writeJson(res, 200, { ok: true, pane_id: paneId, lines, output: text, text });
+    const read = await this.herdrClient.readPane(paneId, lines, {
+      source,
+      format,
+      stripAnsi,
+    });
+    const text = typeof read === 'string'
+      ? read
+      : [read?.text, read?.output, read?.ansi].find((value) => typeof value === 'string') || '';
+    const body = {
+      ok: true,
+      pane_id: paneId,
+      lines,
+      source,
+      format,
+      strip_ansi: stripAnsi,
+      output: typeof text === 'string' ? text : '',
+      text: typeof text === 'string' ? text : '',
+    };
+    if (read && typeof read === 'object' && !Array.isArray(read)) {
+      if (Number.isSafeInteger(read.revision) && read.revision >= 0) body.revision = read.revision;
+      if (typeof read.truncated === 'boolean') body.truncated = read.truncated;
+    }
+    writeJson(res, 200, body);
   }
 
   async handleFocusPane(req, res) {

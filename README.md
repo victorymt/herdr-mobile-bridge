@@ -52,13 +52,28 @@ details explicitly (the token is never written to plugin logs):
 
 ```bash
 node src/launcher.js setup
-node src/launcher.js status
 node src/launcher.js token
+node src/launcher.js ensure
+node src/launcher.js status
 ```
 
-Use the printed token in the mobile browser's login form. After login, the
-browser can request notification permission and register a Web Push
-subscription from the notification controls.
+`setup` only creates or confirms the configuration and credentials; `ensure`
+starts the Bridge. On the computer, open the `url` printed by `status`, which
+defaults to `http://127.0.0.1:8787`. The service is ready only when `status`
+reports `running:true`: `started:true` from `ensure` means that a detached
+child was spawned, not that its listener is ready. If `running:false` appears,
+do not enter the token in the browser yet; check for a port conflict or inspect
+the runtime/plugin log, then poll `status` again.
+
+Open `http://127.0.0.1:8787` in the computer's browser and enter the printed
+token. This loopback address works only on the computer running Bridge; a
+phone's `127.0.0.1` points back to the phone itself. After login, the browser
+can request notification permission and register a Web Push subscription from
+the notification controls.
+
+If `status` reports `lan_proxy_host:null`, the optional LAN proxy is not
+running. Do not open `http://computer-lan-address:18787` until the proxy has
+been enabled with `--lan-host`/`--lan-port` or persisted in `bridge.json`.
 
 For optional HTTPS inside the LAN, configure a local reverse proxy (such as
 Caddy) to forward an HTTPS LAN address to `http://127.0.0.1:8787`. Keep its
@@ -99,9 +114,12 @@ token, session cookies, and (if configured elsewhere) Basic Auth credentials.
 `lanProxyAllowedCidrs` applies only to the built-in Node proxy; `socat` does
 not enforce that ACL, so repeat the source restriction in the host firewall or
 in a trusted reverse proxy.
-For this HTTP-only path, leave `cookieSecure` unset or set it to `false`. If
-`allowedOrigin` is configured explicitly, include the exact LAN origin (for
-example `http://192.168.1.20`) or remove the override for same-host access.
+For this HTTP-only path, leave `cookieSecure` unset or set it to `false`. If it
+is enabled globally, the bridge only adds `Secure` when the current request is
+actually HTTPS, so an HTTP login does not succeed and then immediately lose its
+session. If `allowedOrigin` is configured explicitly, include the exact LAN
+origin (for example `http://192.168.1.20`) or remove the override for same-host
+access.
 
 The launcher can manage the built-in LAN proxy without a separate `socat`
 process. It forwards a LAN listener to the loopback gateway, and the gateway
@@ -201,6 +219,14 @@ The dashboard is constrained to a single Herdr session:
 - send bounded text plus a small allowlist of interactive keys through
   `pane.send_input` (Enter, Escape, Tab, arrows, Backspace, and selected
   control keys).
+
+The output view requests Herdr's `recent_unwrapped` snapshot with
+`format=ansi` and renders common terminal colors and text styles safely in the
+browser. Copying output always returns plain text without escape sequences.
+The output endpoint keeps plain text as its default for compatibility; callers
+that need styling can use `source=recent_unwrapped&format=ansi&strip_ansi=0`.
+Complex cursor movement and alternate-screen controls are reduced to readable
+text rather than emulating a full terminal.
 
 The bridge never exposes a generic socket-method proxy, pane/workspace close
 operations, or terminal-output persistence. Prompt submission is confirmed in
