@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { canonicalContext, normalizeEventName } from './event-bus.js';
+import { canonicalizeAddress } from './rate-limit.js';
 
 const DEFAULT_EVENT_URL = 'http://127.0.0.1:8787/internal/event';
 const MAX_EVENT_BYTES = 256 * 1024;
@@ -28,11 +28,12 @@ function firstNonEmpty(value) {
  */
 function isLoopbackHost(hostname) {
   const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
-  if (host === 'localhost' || host === '::1') return true;
-  if (isIP(host) === 4) return host.startsWith('127.');
-  // WHATWG URL canonicalises IPv4-mapped loopback addresses to hexadecimal
-  // IPv6 notation (for example ::ffff:7f00:1).
-  return /^::ffff:7f00:[0-9a-f]+$/.test(host);
+  if (host === 'localhost') return true;
+  // Use one strict parser for URL validation and the HTTP server's local-only
+  // hook guard. This accepts expanded/mapped loopback spellings while still
+  // rejecting DNS names and malformed literals.
+  const canonical = canonicalizeAddress(host);
+  return canonical === '::1' || canonical.startsWith('127.');
 }
 
 function configuredEventAllowlist(env = process.env, options = {}) {
@@ -135,12 +136,24 @@ function parseEvent(env = process.env) {
 }
 
 function endpointFromEnv(env = process.env) {
-  const value = env.HERDR_BRIDGE_EVENT_URL || env.HERDR_BRIDGE_URL || env.BRIDGE_EVENT_URL;
-  if (!value || !value.trim()) {
-    const stateDir = env.HERDR_PLUGIN_STATE_DIR || env.HERDR_MOBILE_BRIDGE_STATE_DIR || env.BRIDGE_STATE_DIR;
-    if (stateDir) {
+  const value = firstNonEmpty(env.HERDR_BRIDGE_EVENT_URL)
+    || firstNonEmpty(env.HERDR_BRIDGE_URL)
+    || firstNonEmpty(env.BRIDGE_EVENT_URL);
+  if (!value) {
+    // launchers propagate the resolved runtime path because embedders may use
+    // a non-default marker (and port 0 may be replaced by the concrete port
+    // chosen by the OS).  Keep the state-dir fallback for older installations
+    // that only expose the root directory.
+    const runtimePath = firstNonEmpty(env.HERDR_BRIDGE_RUNTIME_PATH)
+      || firstNonEmpty(env.HERDR_RUNTIME_PATH)
+      || firstNonEmpty(env.BRIDGE_RUNTIME_PATH);
+    const stateDir = firstNonEmpty(env.HERDR_PLUGIN_STATE_DIR)
+      || firstNonEmpty(env.HERDR_MOBILE_BRIDGE_STATE_DIR)
+      || firstNonEmpty(env.BRIDGE_STATE_DIR);
+    const markerPath = runtimePath || (stateDir ? join(stateDir, 'runtime.json') : undefined);
+    if (markerPath) {
       try {
-        const runtime = JSON.parse(readFileSync(join(stateDir, 'runtime.json'), 'utf8'));
+        const runtime = JSON.parse(readFileSync(markerPath, 'utf8'));
         if (runtime && Number.isInteger(Number(runtime.port)) && runtime.port > 0) {
           const host = typeof runtime.host === 'string' && runtime.host ? runtime.host : '127.0.0.1';
           const authorityHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
@@ -150,7 +163,7 @@ function endpointFromEnv(env = process.env) {
     }
     return DEFAULT_EVENT_URL;
   }
-  const trimmed = value.trim().replace(/\/+$/, '');
+  const trimmed = value.replace(/\/+$/, '');
   return trimmed.endsWith('/internal/event') ? trimmed : `${trimmed}/internal/event`;
 }
 

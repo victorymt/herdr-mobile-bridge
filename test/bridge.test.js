@@ -2,7 +2,7 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { BridgeServer } from '../src/server.js';
 import { StateStore } from '../src/state-store.js';
@@ -177,6 +177,74 @@ test('injected server configuration cannot bypass the loopback listener boundary
     config: { host: '0.0.0.0', token: 'owner-token', secret: 'hook-secret' },
     herdrClient: fakeClient,
   }), /loopback/);
+});
+
+test('direct BridgeServer construction rejects malformed injected config values', async () => {
+  for (const config of [false, true, 0, 1, '', 'invalid', [], [8787], Symbol('config')]) {
+    assert.throws(
+      () => new BridgeServer({ config, herdrClient: fakeClient }),
+      /options\.config must be an object or null/,
+      `expected malformed config ${String(config)} to be rejected`,
+    );
+  }
+
+  // Explicit null/undefined retain the historical omitted-config behavior.
+  const omitted = new BridgeServer({ config: null, herdrClient: fakeClient });
+  assert.equal(omitted.config.host, '127.0.0.1');
+  await omitted.close();
+});
+
+test('direct BridgeServer construction rejects explicit blank listener settings', async () => {
+  const cases = [
+    ['host', ['', ' ', false, 0], /bridge host must be a loopback address/],
+    ['port', ['', ' '], /bridge port must not be empty/],
+    ['lanProxyHost', ['', ' ', false, 0], /LAN proxy host must be an explicit interface address/],
+    ['lanProxyPort', ['', ' '], /LAN proxy port must not be empty/],
+    ['socketPath', ['', ' ', false, 0], /socket path must|Herdr socket path must/],
+  ];
+  for (const [key, values, pattern] of cases) {
+    for (const value of values) {
+      assert.throws(
+        () => new BridgeServer({ config: { [key]: value }, herdrClient: fakeClient }),
+        pattern,
+        `expected malformed ${key}=${String(value)} to be rejected`,
+      );
+    }
+  }
+
+  // Null/undefined are omission sentinels for direct embedders and retain
+  // the normal defaults, matching loadConfig's programmatic API.
+  const omitted = new BridgeServer({
+    config: { host: null, port: null, lanProxyHost: null, lanProxyPort: null },
+    herdrClient: fakeClient,
+  });
+  assert.equal(omitted.config.host, '127.0.0.1');
+  assert.equal(omitted.config.port, 8787);
+  await omitted.close();
+
+  const relative = new BridgeServer({
+    config: { socketPath: 'nested/herdr.sock' },
+    herdrClient: fakeClient,
+  });
+  assert.equal(relative.config.socketPath, resolve(process.cwd(), 'nested/herdr.sock'));
+  await relative.close();
+
+  const tilde = new BridgeServer({
+    config: { socketPath: '~/nested/herdr.sock' },
+    herdrClient: fakeClient,
+  });
+  const home = typeof process.env.HOME === 'string' && process.env.HOME.trim()
+    ? process.env.HOME.trim()
+    : undefined;
+  if (home) assert.equal(tilde.config.socketPath, join(home, 'nested/herdr.sock'));
+  await tilde.close();
+
+  const targetOmitted = new BridgeServer({
+    config: { lanProxyTargetHost: null },
+    herdrClient: fakeClient,
+  });
+  assert.equal(targetOmitted.config.lanProxyTargetHost, undefined);
+  await targetOmitted.close();
 });
 
 test('resolved push policy propagates to the state store and delivery manager', async () => {

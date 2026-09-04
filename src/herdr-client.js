@@ -143,7 +143,14 @@ function parseResponse(line) {
  */
 export class HerdrSocketClient {
   constructor(options = {}) {
-    this.socketPath = assertSocketPath(options.socketPath || '/tmp/herdr.sock');
+    // Preserve the loader/BridgeServer distinction between an omitted path and
+    // an explicitly supplied empty/invalid one.  Truthiness fallback here
+    // would silently redirect `socketPath: ''`, `false`, or `0` to the default
+    // socket while the higher-level configuration rejects those values.
+    const socketPath = options.socketPath === undefined || options.socketPath === null
+      ? '/tmp/herdr.sock'
+      : options.socketPath;
+    this.socketPath = assertSocketPath(socketPath);
     this.timeoutMs = Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
       ? Number(options.timeoutMs)
       : 5000;
@@ -166,7 +173,9 @@ export class HerdrSocketClient {
       method,
       params: params && typeof params === 'object' ? params : {},
     };
-    const socketPath = assertSocketPath(options.socketPath || this.socketPath);
+    const socketPath = options.socketPath === undefined || options.socketPath === null
+      ? this.socketPath
+      : assertSocketPath(options.socketPath);
     const line = await this.exchange(socketPath, `${JSON.stringify(request)}\n`);
     const response = parseResponse(line);
     if (response.id !== undefined && response.id !== request.id) {

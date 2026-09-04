@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
+import { dirname } from 'node:path';
+import { canonicalizeAddress } from './rate-limit.js';
 
 const MAX_SUBSCRIPTIONS = 256;
 const MAX_DEDUP_ENTRIES = 4096;
@@ -27,8 +29,13 @@ export const DEFAULT_PUSH_PROVIDER_HOSTS = Object.freeze([
 const BLOCKED_PUSH_HOSTNAMES = new Set([
   'localhost',
   'localhost.localdomain',
+  'localhost6',
+  'localhost6.localdomain6',
   'ip6-localhost',
   'ip6-loopback',
+  'ip6-allnodes',
+  'ip6-allrouters',
+  'broadcasthost',
   'metadata',
   'metadata.google.internal',
   'instance-data',
@@ -52,8 +59,10 @@ function normaliseEndpointHost(value) {
   let host = String(value || '').trim().toLowerCase();
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
   // A trailing dot is equivalent for DNS, but keeping it would bypass a
-  // suffix comparison against the provider list.
-  return host.replace(/\.$/, '');
+  // suffix comparison against the provider list. Remove all trailing dots so
+  // malformed-but-parser-tolerated forms such as `localhost...` cannot evade
+  // the local-name checks.
+  return host.replace(/\.+$/, '');
 }
 
 function ipv4Parts(host) {
@@ -64,11 +73,12 @@ function ipv4Parts(host) {
 
 /** Return true for destinations that must never receive a push request. */
 function isPrivateOrLocalIp(host) {
-  const family = isIP(host);
+  const value = normaliseEndpointHost(host);
+  const family = isIP(value);
   if (family === 4) {
-    const parts = ipv4Parts(host);
+    const parts = ipv4Parts(value);
     if (!parts) return true;
-    const [first, second] = parts;
+    const [first, second, third] = parts;
     return first === 0
       || first === 10
       || first === 127
@@ -76,23 +86,42 @@ function isPrivateOrLocalIp(host) {
       || (first === 169 && second === 254) // link-local / cloud metadata
       || (first === 172 && second >= 16 && second <= 31)
       || (first === 192 && second === 168)
-      || (first === 192 && second === 0)
-      || (first === 198 && (second === 18 || second === 19 || second === 51))
-      || (first === 203 && second === 0 && parts[2] === 113)
+      || (first === 192 && second === 0 && third === 0) // IETF protocol assignments
+      || (first === 192 && second === 0 && third === 2) // TEST-NET-1/documentation
+      || (first === 198 && (second === 18 || second === 19)) // benchmarking
+      || (first === 198 && second === 51 && third === 100) // TEST-NET-2/documentation
+      || (first === 203 && second === 0 && third === 113) // TEST-NET-3/documentation
       || first >= 224; // multicast/reserved
   }
   if (family !== 6) return false;
-  const lower = host.toLowerCase();
-  // IPv4-mapped IPv6 literals can encode every private IPv4 range. Reject all
-  // mapped values rather than trying to parse every textual representation.
-  if (lower === '::' || lower === '::1' || lower.startsWith('::ffff:')) return true;
+  // Canonicalize before classifying. WHATWG URL currently compresses most
+  // IPv6 spellings, but this helper is also used on persisted/injected values
+  // and must not rely on that implementation detail. The shared parser folds
+  // every IPv4-mapped spelling (including expanded `0:0:...:ffff:...`) to an
+  // IPv4 value; reject mapped values wholesale so they cannot become a
+  // representation-based SSRF bypass.
+  const canonical = canonicalizeAddress(value);
+  if (canonical === 'unknown') return true;
+  if (isIP(canonical) === 4) return true;
+  const lower = canonical.toLowerCase();
+  // `::/96` is the deprecated IPv4-compatible/unspecified space. It is not a
+  // globally routable push destination and includes alternate spellings such
+  // as `::127.0.0.1`; reject it along with the canonical loopback/unspecified
+  // forms. (IPv4-mapped addresses were handled above.)
+  if (lower === '::' || lower.startsWith('::')) return true;
   const first = Number.parseInt(lower.split(':')[0] || '0', 16);
   if (!Number.isInteger(first)) return true;
   return (first >= 0xfc00 && first <= 0xfdff) // ULA
     || (first >= 0xfe80 && first <= 0xfebf) // link-local
     || (first >= 0xfec0 && first <= 0xfeff) // deprecated site-local
     || (first >= 0xff00 && first <= 0xffff) // multicast/reserved
-    || lower.startsWith('2001:db8:'); // documentation-only range
+    || lower.startsWith('2001:db8:') // documentation-only range
+    // Literal translation/tunnel prefixes can encode an IPv4 destination.
+    // Reject them wholesale: otherwise a NAT64/6to4-capable host could turn a
+    // superficially public IPv6 literal into a request for local IPv4 space.
+    || lower.startsWith('64:ff9b::') // well-known NAT64 prefix
+    || lower.startsWith('64:ff9b:1:') // local-use NAT64 prefix
+    || lower.startsWith('2002:'); // deprecated 6to4
 }
 
 function isBlockedPushHostname(host) {
@@ -107,7 +136,12 @@ function isBlockedPushHostname(host) {
 }
 
 function normalisePushAllowlist(value) {
-  const values = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',') : []);
+  // Commas are the portable environment/config separator. Apply the same
+  // semantics to array items so direct injected configs behave exactly like
+  // the detached child's serialized environment value.
+  const values = Array.isArray(value)
+    ? value.flatMap((entry) => String(entry ?? '').split(','))
+    : (typeof value === 'string' ? value.split(',') : []);
   return [...new Set(values.flatMap((entry) => {
     let candidate = String(entry || '').trim().toLowerCase();
     if (!candidate) return [];
@@ -158,6 +192,16 @@ function validSubscriptionShape(value, options = {}) {
   if (isBlockedPushHostname(host)) return false;
   if (url.port && url.port !== '443' && options.allowCustomEndpoints !== true) return false;
   if (!endpointHostAllowed(host, options)) return false;
+  // PushSubscription.expirationTime is a nullable finite timestamp.  Do not
+  // carry arbitrary objects/arrays through the persistence allowlist: apart
+  // from violating the metadata contract, a caller could otherwise smuggle a
+  // large nested value into subscriptions.json and make JSON serialization
+  // fail or grow without the endpoint/key bounds above.
+  if (value.expirationTime !== undefined && value.expirationTime !== null
+    && (typeof value.expirationTime !== 'number'
+      || !Number.isFinite(value.expirationTime)
+      || value.expirationTime < 0
+      || value.expirationTime > Number.MAX_SAFE_INTEGER)) return false;
   if (value.keys !== undefined) {
     if (!value.keys || typeof value.keys !== 'object' || Array.isArray(value.keys)) return false;
     if (value.keys.p256dh !== undefined && (typeof value.keys.p256dh !== 'string' || value.keys.p256dh.length > 2048)) return false;
@@ -274,6 +318,10 @@ export class StateStore {
 
   async #writeJson(path, value) {
     if (!path) return;
+    // Custom injected paths may live below a directory that is not the
+    // configured state root. Create the parent before the atomic temp-file
+    // write; init() only guarantees `stateDir` itself exists.
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     try {
@@ -516,6 +564,26 @@ function sanitizeRuntime(value) {
   if (Number.isInteger(lanProxyPort) && lanProxyPort >= 1 && lanProxyPort <= 65535) safe.lan_proxy_port = lanProxyPort;
   const lanProxyError = boundedString(source.lan_proxy_error, 240);
   if (lanProxyError) safe.lan_proxy_error = lanProxyError;
+  const configFingerprint = boundedString(source.config_fingerprint, 128);
+  if (configFingerprint && /^[a-f0-9]{32,128}$/i.test(configFingerprint)) safe.config_fingerprint = configFingerprint;
+  if (typeof source.acl_enabled === 'boolean') safe.acl_enabled = source.acl_enabled;
+  const allowedCidrs = Array.isArray(source.lan_proxy_allowed_cidrs)
+    ? source.lan_proxy_allowed_cidrs
+      .filter((value) => typeof value === 'string')
+      .map((value) => boundedString(value, 80))
+      .filter(Boolean)
+      .slice(0, 128)
+    : undefined;
+  if (allowedCidrs?.length) safe.lan_proxy_allowed_cidrs = allowedCidrs;
+  for (const [sourceKey, outputKey] of [
+    ['rate_limit_per_minute', 'rate_limit_per_minute'],
+    ['rate_limit_burst', 'rate_limit_burst'],
+    ['rate_limit_max_entries', 'rate_limit_max_entries'],
+    ['request_body_timeout_ms', 'request_body_timeout_ms'],
+  ]) {
+    const number = Number(source[sourceKey]);
+    if (Number.isInteger(number) && number > 0 && number <= 65_536) safe[outputKey] = number;
+  }
   return safe;
 }
 
@@ -553,7 +621,12 @@ function normalizeSubscription(value) {
     id: id.slice(0, 128),
     endpoint,
   };
-  if (value.expirationTime !== undefined && value.expirationTime !== null) result.expirationTime = value.expirationTime;
+  if (typeof value.expirationTime === 'number'
+    && Number.isFinite(value.expirationTime)
+    && value.expirationTime >= 0
+    && value.expirationTime <= Number.MAX_SAFE_INTEGER) {
+    result.expirationTime = value.expirationTime;
+  }
   if (value.keys && typeof value.keys === 'object') {
     result.keys = {};
     if (typeof value.keys.p256dh === 'string') result.keys.p256dh = value.keys.p256dh;

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import { boundPayload, endpointFromEnv, parseEvent, sendEvent, validateEventEndpoint } from '../src/event-hook.js';
 
@@ -56,6 +59,24 @@ test('event URL defaults to the local gateway and supports an explicit base URL'
   assert.equal(endpointFromEnv({}), 'http://127.0.0.1:8787/internal/event');
   assert.equal(endpointFromEnv({ HERDR_BRIDGE_URL: 'http://127.0.0.1:9999' }), 'http://127.0.0.1:9999/internal/event');
   assert.equal(endpointFromEnv({ HERDR_BRIDGE_EVENT_URL: 'http://127.0.0.1:9999/internal/event' }), 'http://127.0.0.1:9999/internal/event');
+});
+
+test('event URL follows a propagated custom runtime marker path', () => {
+  const root = mkdtempSync(join(tmpdir(), 'herdr-event-runtime-'));
+  const runtimePath = join(root, 'nested', 'bridge-runtime.json');
+  try {
+    // The launcher writes the marker before the hook runs; create the nested
+    // directory here to model an embedder-owned custom state layout.
+    const nested = join(root, 'nested');
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(runtimePath, JSON.stringify({ host: '127.0.0.1', port: 49123 }));
+    assert.equal(
+      endpointFromEnv({ HERDR_BRIDGE_RUNTIME_PATH: runtimePath }),
+      'http://127.0.0.1:49123/internal/event',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('event delivery rejects remote cleartext and requires an HTTPS allowlist', async () => {

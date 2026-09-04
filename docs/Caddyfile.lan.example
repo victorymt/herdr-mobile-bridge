@@ -1,0 +1,23 @@
+# Herdr Mobile Bridge：仅局域网的 Caddy HTTPS 反向代理示例
+#
+# 使用前：
+# 1. 将所有 192.168.1.20 替换为电脑在可信 LAN 上的实际地址。
+# 2. 手机需要信任 Caddy 的本地 CA；也可以把站点名和证书替换为
+#    你自己的受信任证书。
+# 3. bridge.json 中的 allowedOrigin 必须与手机实际访问的 origin 完全一致，
+#    例如 https://192.168.1.20（若使用 8443，则包含 :8443）。
+#
+# Caddy 只监听指定 LAN 地址，Bridge 本身仍保持 127.0.0.1:8787。
+
+https://192.168.1.20 {
+	bind 192.168.1.20
+	tls internal
+
+	# 可选：启用额外的 Basic Auth。先用 `caddy hash-password` 生成哈希，
+	# 再取消下面几行注释；不要把明文密码写入此文件。
+	# basic_auth {
+	#	operator <REPLACE_WITH_BCRYPT_HASH>
+	# }
+
+	reverse_proxy 127.0.0.1:8787
+}

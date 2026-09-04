@@ -55,6 +55,24 @@ test('control input validation rejects empty, oversized, and unsupported values 
   await assert.rejects(() => client.sendPaneInput('w1:p1', { keys: Array(9).fill('enter') }), /at most 8/);
 });
 
+test('Herdr socket client rejects explicit blank or non-string socket overrides', async () => {
+  for (const value of ['', ' ', false, 0, 'relative.sock']) {
+    assert.throws(
+      () => new HerdrSocketClient({ socketPath: value }),
+      /Herdr socket path must be an absolute path/,
+      `constructor socketPath=${String(value)}`,
+    );
+  }
+  const client = new HerdrSocketClient({ socketPath: '/tmp/herdr-client-default.sock' });
+  for (const value of ['', ' ', false, 0, 'relative.sock']) {
+    await assert.rejects(
+      () => client.request('session.snapshot', {}, { socketPath: value }),
+      /Herdr socket path must be an absolute path/,
+      `request socketPath=${String(value)}`,
+    );
+  }
+});
+
 test('Herdr API errors are surfaced without allowing arbitrary socket writes', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'herdr-socket-error-'));
   const socketPath = join(dir, 'herdr.sock');

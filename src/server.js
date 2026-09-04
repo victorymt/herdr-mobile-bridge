@@ -1,9 +1,10 @@
 import http from 'node:http';
+import { isIP } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
-import { networkInterfaces } from 'node:os';
-import { extname, join, resolve, sep } from 'node:path';
+import { homedir, networkInterfaces } from 'node:os';
+import { extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { URL } from 'node:url';
 import QRCode from 'qrcode';
@@ -27,7 +28,21 @@ import {
   DEFAULT_LAN_PROXY_PORT,
   DEFAULT_PORT,
   parsePort,
+  configFingerprint,
+  DEFAULT_PUSH_TIMEOUT_MS,
+  MAX_PUSH_TIMEOUT_MS,
 } from './config.js';
+import { isLocalAddress, parseAllowedCidrs } from './network-acl.js';
+import {
+  TokenBucketLimiter,
+  canonicalizeAddress,
+  hashCredential,
+  DEFAULT_RATE_PER_MINUTE,
+  DEFAULT_RATE_LIMIT_BURST,
+  DEFAULT_RATE_LIMIT_MAX_ENTRIES,
+  MAX_RATE_LIMIT_ENTRIES,
+  MIN_RATE_LIMIT_MAX_ENTRIES,
+} from './rate-limit.js';
 
 const MAX_SSE_CLIENTS = 128;
 const MAX_SSE_PENDING = 512;
@@ -37,6 +52,7 @@ const MAX_STATIC_BYTES = 2 * 1024 * 1024;
 const MAX_DISCOVERY_QR_CODES = 8;
 const MAX_DISCOVERY_QR_URL_BYTES = 512;
 const MAX_DISCOVERY_HOSTS = 8;
+export const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 10_000;
 const PUBLIC_DIR = resolve(fileURLToPath(new URL('../public', import.meta.url)));
 const MIME_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
@@ -69,10 +85,78 @@ function writeError(res, status, code, message, details) {
   writeJson(res, status, body);
 }
 
+function bodyReadStatus(error) {
+  if (error?.code === 'body_too_large') return 413;
+  if (error?.code === 'request_body_timeout') return 408;
+  return statusForError(error);
+}
+
+function closeRequestAfterResponse(req, res) {
+  if (!req || typeof req.destroy !== 'function') return;
+  if (req.__bridgeCloseScheduled) return;
+  req.__bridgeCloseScheduled = true;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      if (typeof res?.off === 'function') {
+        if (finishListener) res.off('finish', finishListener);
+        if (closeListener) res.off('close', closeListener);
+      }
+    } catch { /* best effort */ }
+    try { req.destroy(); } catch { /* the peer may already be gone */ }
+  };
+  let finishListener;
+  let closeListener;
+  if (res?.writableEnded || res?.writableFinished) {
+    // `finish` may already have fired by the time an early auth/routing
+    // response reaches the finally block; do not leave an unread body on a
+    // keep-alive socket in that case.
+    setImmediate(close);
+  } else if (typeof res?.once === 'function') {
+    finishListener = () => setImmediate(close);
+    closeListener = () => setImmediate(close);
+    res.once('finish', finishListener);
+    res.once('close', closeListener);
+  } else {
+    setImmediate(close);
+  }
+}
+
+function requestMayHaveBody(req) {
+  const length = req.headers?.['content-length'];
+  const transfer = req.headers?.['transfer-encoding'];
+  return (length !== undefined && String(length) !== '0') || Boolean(transfer);
+}
+
+function closeUnreadRequest(req, res) {
+  if (!requestMayHaveBody(req) || req.complete || req.readableEnded) return;
+  try { req.resume?.(); } catch { /* best effort */ }
+  closeRequestAfterResponse(req, res);
+}
+
+function rejectUnexpectedBody(req, res) {
+  if (!requestMayHaveBody(req)) return false;
+  res.setHeader?.('connection', 'close');
+  writeError(res, 400, 'request_body_not_allowed', 'request body is not allowed for this endpoint');
+  closeRequestAfterResponse(req, res);
+  return true;
+}
+
+function writeBodyReadError(req, res, error) {
+  const status = bodyReadStatus(error);
+  if (error?.requestClose) res.setHeader?.('connection', 'close');
+  writeError(res, status, error?.code || 'invalid_json', error?.message || 'invalid request body');
+  if (error?.requestClose) closeRequestAfterResponse(req, res);
+}
+
 function statusForError(error) {
   if (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599) return error.status;
-  if (['invalid_json', 'body_too_large', 'invalid_subscription', 'invalid_pane_id', 'invalid_workspace_id', 'invalid_lines', 'origin_forbidden', 'csrf_failed'].includes(error?.code)) {
-    return error.code === 'body_too_large' ? 413 : 400;
+  if (['invalid_json', 'body_too_large', 'request_body_timeout', 'invalid_subscription', 'invalid_pane_id', 'invalid_workspace_id', 'invalid_lines', 'origin_forbidden', 'csrf_failed'].includes(error?.code)) {
+    if (error.code === 'body_too_large') return 413;
+    if (error.code === 'request_body_timeout') return 408;
+    return 400;
   }
   if (error instanceof EventInputError || error?.code === 'invalid_event') return 400;
   if (error instanceof TypeError || error?.code === 'invalid_subscription') return 400;
@@ -113,13 +197,33 @@ function originAllowed(configOrigin, requestOrigin, requestHost) {
 }
 
 function isLoopback(req) {
-  const address = req.socket?.remoteAddress || '';
-  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+  let address;
+  try {
+    address = req?.socket?.remoteAddress ?? req?.connection?.remoteAddress;
+  } catch {
+    // A malformed/injected request object must fail closed rather than turn a
+    // property-access failure into an internal-event authorization bypass.
+    return false;
+  }
+  // Use the same strict IP parser as the LAN ACL.  Besides the usual
+  // `127.0.0.1`/`::1`, this recognizes every IPv4 loopback address in
+  // 127.0.0.0/8, expanded IPv6 spellings of ::1, and IPv4-mapped loopback
+  // addresses (including an expanded mapped representation).  We deliberately
+  // do not inspect forwarded headers: this endpoint is a kernel-level
+  // loopback boundary, not an application proxy trust boundary.
+  return isLocalAddress(address, '127.0.0.1');
+}
+
+function requestRemoteAddress(req) {
+  return req?.socket?.remoteAddress ?? req?.connection?.remoteAddress;
 }
 
 function isPrivateLanAddress(address, family) {
-  const value = String(address || '').toLowerCase();
+  const raw = String(address || '').trim();
+  const detectedFamily = isIP(raw);
+  const value = raw.toLowerCase();
   if (family === 'IPv4' || family === 4) {
+    if (detectedFamily !== 4) return false;
     const octets = value.split('.').map((part) => Number(part));
     if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
     const [first, second] = octets;
@@ -128,6 +232,7 @@ function isPrivateLanAddress(address, family) {
       || (first === 192 && second === 168)
       || (first === 100 && second >= 64 && second <= 127);
   }
+  if (detectedFamily !== 6) return false;
   // ULA IPv6 addresses are usable in a browser URL. Link-local addresses
   // require an interface scope (for example `%25wlan0`) that Node's generic
   // networkInterfaces() result does not expose consistently, so omit them
@@ -138,11 +243,15 @@ function isPrivateLanAddress(address, family) {
 function collectLanAddresses(config = {}, interfaces = networkInterfaces()) {
   const values = [];
   const configured = String(config.lanProxyHost || '').trim();
-  if (configured && configured !== '0.0.0.0' && configured !== '::') values.push(configured);
+  if (configured && configured !== '0.0.0.0' && configured !== '::') {
+    const normalized = canonicalizeAddress(configured);
+    if (normalized !== 'unknown' && normalized !== '0.0.0.0' && normalized !== '::') values.push(normalized);
+  }
   for (const entries of Object.values(interfaces || {})) {
     for (const item of entries || []) {
       if (!item || item.internal || !isPrivateLanAddress(item.address, item.family)) continue;
-      values.push(String(item.address));
+      const normalized = canonicalizeAddress(String(item.address));
+      if (normalized !== 'unknown') values.push(normalized);
     }
   }
   const unique = [...new Set(values)];
@@ -257,35 +366,91 @@ function mergeSnapshotResponse(snapshot, statuses) {
   return body;
 }
 
-async function readBody(req, maxBytes) {
+function bodyReadError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  if (code === 'body_too_large') error.status = 413;
+  if (code === 'request_body_timeout') error.status = 408;
+  error.requestClose = true;
+  return error;
+}
+
+/**
+ * Read and parse one JSON object with both a size bound and an absolute wall
+ * clock deadline.  The collector is deliberately kept alive until the
+ * response has been written; callers mark the response's connection for
+ * closure so a slow peer cannot poison a subsequent keep-alive request.
+ */
+async function readBody(req, maxBytes, timeoutMs = DEFAULT_REQUEST_BODY_TIMEOUT_MS) {
+  const limit = Number.isFinite(Number(maxBytes)) && Number(maxBytes) > 0 ? Number(maxBytes) : 1024 * 1024;
+  const timeout = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : DEFAULT_REQUEST_BODY_TIMEOUT_MS;
   const declared = Number(req.headers?.['content-length']);
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    const error = new Error(`request body exceeds ${maxBytes} bytes`);
-    error.code = 'body_too_large';
-    throw error;
+  if (Number.isFinite(declared) && declared > limit) {
+    throw bodyReadError('body_too_large', `request body exceeds ${limit} bytes`);
   }
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > maxBytes) {
-      const error = new Error(`request body exceeds ${maxBytes} bytes`);
-      error.code = 'body_too_large';
-      throw error;
+  const collect = (async () => {
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of req) {
+      // IncomingMessage normally yields Buffers, but a few embedders and
+      // tests provide a generic async iterable that yields strings or typed
+      // arrays. Normalize at the boundary so size accounting and concatenation
+      // remain deterministic instead of surfacing an unrelated 500.
+      let buffer;
+      try {
+        buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      } catch {
+        throw bodyReadError('invalid_json', 'invalid request body chunk');
+      }
+      size += buffer.length;
+      if (size > limit) {
+        throw bodyReadError('body_too_large', `request body exceeds ${limit} bytes`);
+      }
+      chunks.push(buffer);
     }
-    chunks.push(chunk);
-  }
-  if (!chunks.length) return {};
-  const text = Buffer.concat(chunks).toString('utf8').trim();
-  if (!text) return {};
+    if (!chunks.length) return {};
+    const text = Buffer.concat(chunks).toString('utf8').trim();
+    if (!text) return {};
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('JSON body must be an object');
+      return parsed;
+    } catch (error) {
+      const wrapped = new Error(`invalid JSON body: ${error.message}`);
+      wrapped.code = 'invalid_json';
+      throw wrapped;
+    }
+  })();
+  const COMPLETE_SENTINEL = Symbol('body-complete');
+  let timer;
+  const timeoutPromise = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      // If the readable side has actually ended, prefer the body collector's
+      // completion even when the timer callback was queued in the same turn.
+      // `IncomingMessage.complete` only means the HTTP parser saw the final
+      // bytes; a custom/slow async iterator can still remain open, so using it
+      // here would let a supposedly absolute deadline wait forever.
+      if (req.readableEnded) {
+        resolve(COMPLETE_SENTINEL);
+        return;
+      }
+      reject(bodyReadError('request_body_timeout', `request body did not complete within ${timeout} ms`));
+    }, timeout);
+  });
   try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('JSON body must be an object');
-    return parsed;
+    const result = await Promise.race([collect, timeoutPromise]);
+    // A completed request wins over the sentinel timeout promise.
+    if (result === COMPLETE_SENTINEL) return await collect;
+    return result;
   } catch (error) {
-    const wrapped = new Error(`invalid JSON body: ${error.message}`);
-    wrapped.code = 'invalid_json';
-    throw wrapped;
+    // Once the timer wins, the async iterator may reject later when the
+    // response closes the socket. Attach a handler now to avoid an unhandled
+    // ERR_STREAM_PREMATURE_CLOSE while retaining the useful client error.
+    collect.catch(() => {});
+    try { req.resume?.(); } catch { /* best effort */ }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -333,19 +498,121 @@ function sseFrame(event) {
 
 export class BridgeServer {
   constructor(options = {}) {
-    this.config = { ...(options.config || {}) };
+    const injectedConfig = options.config;
+    // BridgeServer is exported for embedders that may construct it directly,
+    // bypassing createBridgeServer(). Keep the same boundary contract at this
+    // lower-level entry point: only an object (or an explicit null/undefined
+    // omission) can be used as configuration. Object-spreading primitives
+    // would otherwise silently turn false, strings, or arrays into an empty
+    // default configuration and make the listener policy depend on the entry
+    // point used by the caller.
+    if (injectedConfig !== undefined && injectedConfig !== null
+      && (typeof injectedConfig !== 'object' || Array.isArray(injectedConfig))) {
+      throw new TypeError('options.config must be an object or null');
+    }
+    // Match the config loader's explicit-value semantics for listener
+    // settings.  `parsePort()` intentionally treats a blank value as a
+    // generic fallback, but a caller that supplied an own property here has
+    // made an explicit configuration choice; silently replacing it with a
+    // default would make direct construction diverge from loadConfig().
+    const explicitBlank = (key) => injectedConfig !== undefined
+      && injectedConfig !== null
+      && Object.prototype.hasOwnProperty.call(injectedConfig, key)
+      && typeof injectedConfig[key] === 'string'
+      && injectedConfig[key].trim() === '';
+    if (explicitBlank('host')) throw new TypeError('bridge host must be a loopback address');
+    if (explicitBlank('port')) throw new TypeError('bridge port must not be empty');
+    if (explicitBlank('lanProxyHost')) throw new TypeError('LAN proxy host must be an explicit interface address');
+    if (explicitBlank('lanProxyPort')) throw new TypeError('LAN proxy port must not be empty');
+    this.config = { ...(injectedConfig || {}) };
+    if (this.config.socketPath !== undefined && this.config.socketPath !== null) {
+      if (typeof this.config.socketPath !== 'string' || this.config.socketPath.trim() === '') {
+        throw new TypeError('socket path must not be empty');
+      }
+      if (this.config.socketPath.includes('\0')) throw new TypeError('Herdr socket path must be an absolute path');
+      // loadConfig() expands `~` and resolves relative socket paths before
+      // constructing the client. Direct BridgeServer embedders should get the
+      // same deterministic path instead of handing a relative value to an
+      // injected client (or failing only when the child tries to connect).
+      const configuredHome = options.env && typeof options.env === 'object'
+        ? (options.env.HOME || options.env.USERPROFILE)
+        : undefined;
+      const home = typeof configuredHome === 'string' && configuredHome.trim()
+        ? configuredHome.trim()
+        : (typeof process.env.HOME === 'string' && process.env.HOME.trim() ? process.env.HOME.trim() : homedir());
+      const socketValue = this.config.socketPath;
+      const expandedSocket = socketValue === '~'
+        ? home
+        : (socketValue.startsWith('~/') ? join(home, socketValue.slice(2)) : socketValue);
+      this.config.socketPath = resolve(expandedSocket);
+      // `resolve()` always returns an absolute path on supported platforms;
+      // keep an explicit guard for unusual path implementations and future
+      // portability changes.
+      if (!isAbsolute(this.config.socketPath)) throw new TypeError('Herdr socket path must be an absolute path');
+    }
     // Callers embedding BridgeServer may inject a config object directly and
     // therefore bypass loadConfig(). Re-validate listener boundaries here so
     // an accidental wildcard host can never expose the authenticated Bridge.
-    this.config.host = assertBridgeHost(this.config.host || DEFAULT_HOST);
+    // Null/undefined mean omitted; every other supplied value (including
+    // false/0/empty strings) must pass the strict host validator rather than
+    // being hidden by a truthiness fallback.
+    this.config.host = assertBridgeHost(this.config.host ?? DEFAULT_HOST);
     this.config.port = parsePort(this.config.port, DEFAULT_PORT);
-    if (this.config.lanProxyHost) {
+    if (this.config.lanProxyTargetHost !== undefined && this.config.lanProxyTargetHost !== null && this.config.lanProxyTargetHost !== '') {
+      this.config.lanProxyTargetHost = assertBridgeHost(this.config.lanProxyTargetHost);
+    } else if (this.config.lanProxyTargetHost === '' || this.config.lanProxyTargetHost === null) {
+      this.config.lanProxyTargetHost = undefined;
+    }
+    const positiveInteger = (value, fallback, maximum = Number.MAX_SAFE_INTEGER, label = 'value', minimum = 1) => {
+      if (value === undefined) return fallback;
+      const number = Number(value);
+      if (!Number.isInteger(number) || number < minimum || number > maximum) {
+        if (minimum > 1) {
+          throw new TypeError(`${label} must be between ${minimum} and ${maximum}`);
+        }
+        if (!Number.isInteger(number) || number <= 0) {
+          throw new TypeError(`${label} must be a positive integer`);
+        }
+        throw new TypeError(`${label} must be between 1 and ${maximum}`);
+      }
+      return number;
+    };
+    const configBoolean = (value, fallback = false) => {
+      if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return fallback;
+      if (typeof value === 'boolean') return value;
+      return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+    };
+    this.config.requestBodyTimeoutMs = positiveInteger(this.config.requestBodyTimeoutMs, DEFAULT_REQUEST_BODY_TIMEOUT_MS, 60_000, 'requestBodyTimeoutMs');
+    this.config.rateLimitPerMinute = positiveInteger(this.config.rateLimitPerMinute, DEFAULT_RATE_PER_MINUTE, 10_000, 'rateLimitPerMinute');
+    this.config.rateLimitBurst = positiveInteger(this.config.rateLimitBurst, Math.min(DEFAULT_RATE_LIMIT_BURST, this.config.rateLimitPerMinute), this.config.rateLimitPerMinute, 'rateLimitBurst');
+    this.config.rateLimitMaxEntries = positiveInteger(this.config.rateLimitMaxEntries, DEFAULT_RATE_LIMIT_MAX_ENTRIES, MAX_RATE_LIMIT_ENTRIES, 'rateLimitMaxEntries', MIN_RATE_LIMIT_MAX_ENTRIES);
+    this.config.allowedOrigin = this.config.allowedOrigin == null ? '' : this.config.allowedOrigin;
+    this.config.cookieSecure = configBoolean(this.config.cookieSecure);
+    this.config.healthDetails = configBoolean(this.config.healthDetails);
+    this.config.allowSseQueryToken = configBoolean(this.config.allowSseQueryToken);
+    this.config.allowCustomPushEndpoints = configBoolean(this.config.allowCustomPushEndpoints ?? this.config.allowCustomEndpoints);
+    this.config.allowPushRelay = configBoolean(this.config.allowPushRelay ?? this.config.allowRelay);
+    const pushTimeout = Number(this.config.pushTimeoutMs);
+    this.config.pushTimeoutMs = Number.isFinite(pushTimeout) && pushTimeout > 0
+      ? Math.min(MAX_PUSH_TIMEOUT_MS, Math.max(1, Math.floor(pushTimeout)))
+      : DEFAULT_PUSH_TIMEOUT_MS;
+    if (this.config.lanProxyAllowedCidrs !== undefined) {
+      this.config.lanProxyAllowedCidrs = parseAllowedCidrs(this.config.lanProxyAllowedCidrs, { maxEntries: 128 });
+      if (!this.config.lanProxyHost) throw new TypeError('lanProxyAllowedCidrs requires lanProxyHost');
+    }
+    if (this.config.lanProxyHost !== undefined && this.config.lanProxyHost !== null) {
       this.config.lanProxyHost = assertLanProxyHost(this.config.lanProxyHost);
       this.config.lanProxyPort = parsePort(this.config.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
       if (this.config.lanProxyPort < 1 || this.config.lanProxyPort === this.config.port) {
         throw new Error('LAN proxy port must be between 1 and 65535 and differ from bridge port');
       }
     }
+    // Compute the marker from the effective, normalized values. In particular,
+    // a directly embedded server may provide a whitespace-padded LAN host or
+    // an unnormalized CIDR even though loadConfig() normally canonicalizes it.
+    // Doing this after validation avoids spurious launcher restarts and keeps
+    // the fingerprint meaningful for both construction paths.
+    this.config.configFingerprint = configFingerprint(this.config);
     this.publicDir = resolve(options.publicDir || this.config.publicDir || PUBLIC_DIR);
     this.logger = options.logger || console;
     this.herdrClient = options.herdrClient;
@@ -404,7 +671,14 @@ export class BridgeServer {
     this.runtimeWritten = false;
     this.stateCache = null;
     this.stateCacheAt = 0;
-    this.loginAttempts = new Map();
+    this.rateLimiter = options.rateLimiter === false
+      ? null
+      : (options.rateLimiter || new TokenBucketLimiter({
+        ratePerMinute: this.config.rateLimitPerMinute,
+        burst: this.config.rateLimitBurst,
+        maxEntries: this.config.rateLimitMaxEntries,
+        now: options.now,
+      }));
     this.controlInFlight = new Map();
     this.unsubscribeStateInvalidation = this.eventBus.subscribe(() => {
       this.stateCache = null;
@@ -448,7 +722,11 @@ export class BridgeServer {
     return {
       ok: true,
       service: 'herdr-mobile-bridge',
-      bridge: { host: address.host, port: address.port, loopback: address.host === '127.0.0.1' || address.host === '::1' },
+      bridge: {
+        host: address.host,
+        port: address.port,
+        loopback: isLocalAddress(address.host, '127.0.0.1'),
+      },
       lan_proxy: {
         enabled: Boolean(lanHost),
         host: lanHost,
@@ -462,7 +740,7 @@ export class BridgeServer {
       },
       request: { secure },
       hints: {
-        manual_forward: `socat TCP-LISTEN:${lanPort},bind=<LAN_IP>,reuseaddr,fork TCP:127.0.0.1:${address.port}`,
+        manual_forward: `socat TCP-LISTEN:${lanPort},bind=<LAN_IP>,reuseaddr,fork TCP:${authorityHost(address.host)}:${address.port}`,
         vpn_bypass: '如果手机 VPN 阻断私网访问，请开启“允许局域网 / Allow LAN traffic / Bypass private networks”。',
       },
     };
@@ -537,8 +815,22 @@ export class BridgeServer {
     const host = this.config.host || '127.0.0.1';
     const port = Number(this.config.port ?? 8787);
     const listener = http.createServer((req, res) => {
-      this.handle(req, res).catch((error) => this.handleError(res, error));
+      // A body-bearing request may be rejected before its payload is read
+      // (authentication, origin, method, or rate-limit checks). Marking these
+      // responses as non-persistent up front prevents an unread payload from
+      // being interpreted as the next request on a keep-alive connection.
+      // readBody callers consequently close their normal POST/DELETE response
+      // as well; the predictable one-request boundary is preferable to
+      // risking request smuggling when a client disconnects mid-body.
+      if (requestMayHaveBody(req)) res.setHeader('connection', 'close');
+      this.handle(req, res)
+        .catch((error) => this.handleError(res, error, req))
+        .finally(() => closeUnreadRequest(req, res));
     });
+    // Bound requests that never reach one of the explicit readBody callers.
+    // Keep the generic socket idle timeout untouched: SSE connections are
+    // intentionally long-lived and are protected by their own cleanup path.
+    listener.requestTimeout = this.config.requestBodyTimeoutMs;
     this.server = listener;
     try {
       await new Promise((resolve, reject) => {
@@ -575,6 +867,13 @@ export class BridgeServer {
         port: address.port,
         socket_path: this.config.socketPath,
         started_at: this.startedAt.toISOString(),
+        config_fingerprint: this.config.configFingerprint,
+        acl_enabled: Array.isArray(this.config.lanProxyAllowedCidrs),
+        lan_proxy_allowed_cidrs: this.config.lanProxyAllowedCidrs || [],
+        rate_limit_per_minute: this.config.rateLimitPerMinute,
+        rate_limit_burst: this.config.rateLimitBurst,
+        rate_limit_max_entries: this.config.rateLimitMaxEntries,
+        request_body_timeout_ms: this.config.requestBodyTimeoutMs,
       });
       this.runtimeWritten = true;
     } catch (error) {
@@ -606,6 +905,11 @@ export class BridgeServer {
     if (this.server) {
       const server = this.server;
       this.server = null;
+      // `server.close()` waits for handlers that are still reading a body.
+      // Force active connections down first so shutdown is bounded even when
+      // a peer deliberately sends only half a request (or holds an SSE socket
+      // open while the bridge is being stopped).
+      try { server.closeAllConnections?.(); } catch { /* best effort */ }
       await new Promise((resolve) => server.close(() => resolve()));
     }
     if (this.runtimeWritten) {
@@ -674,6 +978,10 @@ export class BridgeServer {
 
   async serveStatic(req, res, pathname) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+    // Static resources are intentionally bodyless. Reject a supplied payload
+    // instead of parsing it as a future keep-alive request; this also keeps the
+    // public surface consistent with the bodyless discovery/health routes.
+    if (rejectUnexpectedBody(req, res)) return true;
     let relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
     try { relative = decodeURIComponent(relative); } catch { return false; }
     if (!relative || relative.includes('\0') || relative.split('/').includes('..') || relative.includes('\\')) return false;
@@ -700,6 +1008,7 @@ export class BridgeServer {
   async handle(req, res) {
     this.setCors(req, res);
     if (req.method === 'OPTIONS') {
+      if (rejectUnexpectedBody(req, res)) return;
       res.writeHead(204);
       res.end();
       return;
@@ -708,6 +1017,7 @@ export class BridgeServer {
     const pathname = url.pathname.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
 
     if (req.method === 'GET' && pathname === '/healthz') {
+      if (rejectUnexpectedBody(req, res)) return;
       const health = { ok: true, service: 'herdr-mobile-bridge' };
       if (this.config.healthDetails === true) {
         const runtime = this.store.initialized ? await this.store.getRuntime().catch(() => ({})) : {};
@@ -721,6 +1031,7 @@ export class BridgeServer {
     // explain how to reach this machine. It exposes only local addresses and
     // ports—never tokens, socket paths, PIDs, or terminal data.
     if (req.method === 'GET' && pathname === '/api/discovery') {
+      if (rejectUnexpectedBody(req, res)) return;
       const includeQr = url.searchParams.get('qr') === '1' || url.searchParams.get('include_qr') === '1';
       writeJson(res, 200, includeQr ? await this.connectionInfoWithQr(req) : this.connectionInfo(req));
       return;
@@ -754,9 +1065,11 @@ export class BridgeServer {
       allowQuery: pathname === '/api/stream' && this.config.allowSseQueryToken === true,
     });
     if (!authResult.ok) {
+      if (!this.consumeRate(req, res, null)) return;
       writeError(res, 401, 'unauthorized', 'authentication required');
       return;
     }
+    if (!this.consumeRate(req, res, authResult)) return;
 
     if (req.method === 'POST' || req.method === 'DELETE') {
       this.requireMutationSecurity(req, url, authResult);
@@ -764,12 +1077,14 @@ export class BridgeServer {
 
     if (pathname === '/api/auth/logout') {
       if (req.method !== 'POST') return this.methodNotAllowed(res, ['POST']);
+      if (rejectUnexpectedBody(req, res)) return;
       this.auth.logout(req);
       writeJson(res, 200, { ok: true, logged_out: true }, { 'set-cookie': [this.auth.clearCookie(), this.auth.clearCsrfCookie?.() || ''] });
       return;
     }
 
     if (req.method === 'GET' && pathname === '/api/state') {
+      if (rejectUnexpectedBody(req, res)) return;
       writeJson(res, 200, await this.readState());
       return;
     }
@@ -805,6 +1120,7 @@ export class BridgeServer {
     }
     if (pathname === '/api/push/key') {
       if (req.method !== 'GET') return this.methodNotAllowed(res, ['GET']);
+      if (rejectUnexpectedBody(req, res)) return;
       const key = this.push.publicKey;
       writeJson(res, 200, { ok: true, publicKey: key, vapidPublicKey: key, vapid_public_key: key });
       return;
@@ -857,16 +1173,12 @@ export class BridgeServer {
       writeError(res, 403, 'origin_forbidden', 'request Origin is not allowed');
       return;
     }
-    if (!this.allowLoginAttempt(req)) {
-      res.setHeader('retry-after', '30');
-      writeError(res, 429, 'rate_limited', 'too many login attempts');
-      return;
-    }
+    if (!this.consumeLoginRate(req, res)) return;
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
     } catch (error) {
-      return writeError(res, error.code === 'body_too_large' ? 413 : 400, error.code || 'invalid_json', error.message);
+      return writeBodyReadError(req, res, error);
     }
     const result = this.auth.login(body);
     if (!result.ok) return writeError(res, 401, 'invalid_credentials', 'invalid bridge token');
@@ -877,20 +1189,69 @@ export class BridgeServer {
     }, { 'set-cookie': [this.auth.sessionCookie(result.session), this.auth.csrfCookie?.(result.csrf) || ''] });
   }
 
-  allowLoginAttempt(req) {
-    const now = Date.now();
-    // Bound this map even when an attacker rotates source addresses.
-    for (const [address, value] of this.loginAttempts) {
-      if (value.resetAt <= now) this.loginAttempts.delete(address);
+  rateLimitDescriptors(req, authResult, profile = 'api') {
+    const address = canonicalizeAddress(requestRemoteAddress(req));
+    const descriptors = [{ key: `${profile}:ip:${address}`, profile }];
+    if (authResult?.ok && authResult.token) {
+      descriptors.push({ key: `${profile}:credential:${hashCredential(authResult.token)}`, profile });
     }
-    const key = String(req.socket?.remoteAddress || 'unknown');
-    const entry = this.loginAttempts.get(key) || { count: 0, resetAt: now + 60_000 };
-    if (entry.resetAt <= now) { entry.count = 0; entry.resetAt = now + 60_000; }
-    entry.count += 1;
-    this.loginAttempts.set(key, entry);
-    // Five attempts per minute per source is enough for a manually entered
-    // token while limiting online guessing against the owner token.
-    return entry.count <= 5;
+    return descriptors;
+  }
+
+  rejectRateLimit(req, res, result) {
+    const retryAfterMs = Number.isFinite(Number(result?.retryAfterMs))
+      ? Math.max(1, Number(result.retryAfterMs))
+      : (Number.isFinite(Number(result?.retryAfter))
+        ? Math.max(1, Number(result.retryAfter) * 1000)
+        : 60_000);
+    const retryAfter = Math.max(1, Math.ceil(retryAfterMs / 1000));
+    res.setHeader?.('retry-after', String(retryAfter));
+    res.setHeader?.('connection', 'close');
+    try { req.resume?.(); } catch { /* best effort */ }
+    writeError(res, 429, 'rate_limited', 'too many requests');
+    closeRequestAfterResponse(req, res);
+    return false;
+  }
+
+  consumeRate(req, res, authResult) {
+    if (!this.rateLimiter) return true;
+    let result;
+    try {
+      const descriptors = this.rateLimitDescriptors(req, authResult, 'api');
+      const consume = typeof this.rateLimiter.tryConsume === 'function'
+        ? this.rateLimiter.tryConsume
+        : this.rateLimiter.consume;
+      if (typeof consume !== 'function') throw new TypeError('rate limiter must expose tryConsume() or consume()');
+      result = consume.call(this.rateLimiter, descriptors);
+    } catch (error) {
+      // A limiter is part of the security boundary. If an injected/custom
+      // implementation fails, reject the request rather than accidentally
+      // converting the failure into an unlimited unauthenticated path.
+      this.logger.warn?.('rate limiter rejected a decision', error?.message || error);
+      return this.rejectRateLimit(req, res, { retryAfterMs: 60_000 });
+    }
+    return result === true || result?.allowed === true ? true : this.rejectRateLimit(req, res, result);
+  }
+
+  consumeLoginRate(req, res) {
+    if (!this.rateLimiter) return true;
+    let result;
+    try {
+      const address = canonicalizeAddress(requestRemoteAddress(req));
+      // Login has its own fixed five-attempt profile. Keep it independent of
+      // the deployment-wide API bucket so a low API setting cannot prevent a
+      // user from completing the normal five-try manual login flow.
+      const descriptors = [{ key: `login:ip:${address}`, profile: 'login' }];
+      const consume = typeof this.rateLimiter.tryConsume === 'function'
+        ? this.rateLimiter.tryConsume
+        : this.rateLimiter.consume;
+      if (typeof consume !== 'function') throw new TypeError('rate limiter must expose tryConsume() or consume()');
+      result = consume.call(this.rateLimiter, descriptors);
+    } catch (error) {
+      this.logger.warn?.('login rate limiter rejected a decision', error?.message || error);
+      return this.rejectRateLimit(req, res, { retryAfterMs: 60_000 });
+    }
+    return result === true || result?.allowed === true ? true : this.rejectRateLimit(req, res, result);
   }
 
   async handleInternalEvent(req, res) {
@@ -907,15 +1268,16 @@ export class BridgeServer {
     }
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
       const result = await this.eventBus.processIncoming(body);
       writeJson(res, result.duplicate ? 200 : 202, { ok: true, ...result });
     } catch (error) {
-      this.handleError(res, error);
+      this.handleError(res, error, req);
     }
   }
 
   async handleOutput(req, res, url, encodedPaneId) {
+    if (rejectUnexpectedBody(req, res)) return;
     const paneId = decodeSegment(encodedPaneId);
     if (!paneId) return writeError(res, 400, 'invalid_pane_id', 'invalid pane id');
     let lines;
@@ -932,9 +1294,9 @@ export class BridgeServer {
   async handleFocusPane(req, res) {
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
     } catch (error) {
-      return writeError(res, error.code === 'body_too_large' ? 413 : 400, error.code || 'invalid_json', error.message);
+      return writeBodyReadError(req, res, error);
     }
     const paneId = idFromBody(body, ['pane_id', 'paneId', 'id']);
     if (!paneId) return writeError(res, 400, 'invalid_pane_id', 'pane_id is required');
@@ -949,9 +1311,9 @@ export class BridgeServer {
   async handleFocusWorkspace(req, res) {
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
     } catch (error) {
-      return writeError(res, error.code === 'body_too_large' ? 413 : 400, error.code || 'invalid_json', error.message);
+      return writeBodyReadError(req, res, error);
     }
     const workspaceId = idFromBody(body, ['workspace_id', 'workspaceId', 'id']);
     if (!workspaceId) return writeError(res, 400, 'invalid_workspace_id', 'workspace_id is required');
@@ -963,9 +1325,9 @@ export class BridgeServer {
   async handleAgentPrompt(req, res) {
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
     } catch (error) {
-      return writeError(res, error.code === 'body_too_large' ? 413 : 400, error.code || 'invalid_json', error.message);
+      return writeBodyReadError(req, res, error);
     }
     const paneId = idFromBody(body, ['pane_id', 'paneId']);
     if (!paneId) return writeError(res, 400, 'invalid_pane_id', 'pane_id is required');
@@ -980,9 +1342,9 @@ export class BridgeServer {
   async handlePaneInput(req, res) {
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
     } catch (error) {
-      return writeError(res, error.code === 'body_too_large' ? 413 : 400, error.code || 'invalid_json', error.message);
+      return writeBodyReadError(req, res, error);
     }
     const paneId = idFromBody(body, ['pane_id', 'paneId']);
     if (!paneId) return writeError(res, 400, 'invalid_pane_id', 'pane_id is required');
@@ -1000,20 +1362,20 @@ export class BridgeServer {
   async handleSubscriptionAdd(req, res) {
     let body;
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
       const subscription = await this.push.register(body);
       writeJson(res, 201, { ok: true, subscription });
     } catch (error) {
-      this.handleError(res, error);
+      this.handleError(res, error, req);
     }
   }
 
   async handleSubscriptionRemove(req, res, url) {
     let body = {};
     try {
-      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024);
+      body = await readBody(req, this.config.maxBodyBytes || 1024 * 1024, this.config.requestBodyTimeoutMs);
     } catch (error) {
-      return writeError(res, error.code === 'body_too_large' ? 413 : 400, error.code || 'invalid_json', error.message);
+      return writeBodyReadError(req, res, error);
     }
     const id = idFromBody(body, ['id', 'subscription_id', 'subscriptionId']) || url.searchParams.get('id');
     const endpoint = body.endpoint || url.searchParams.get('endpoint');
@@ -1022,11 +1384,15 @@ export class BridgeServer {
       const removed = await this.push.remove({ id, endpoint });
       writeJson(res, 200, { ok: true, removed });
     } catch (error) {
-      this.handleError(res, error);
+      this.handleError(res, error, req);
     }
   }
 
   async handleStream(req, res, url) {
+    // An SSE response never finishes while healthy, so the generic
+    // closeUnreadRequest() hook cannot safely drain a stray GET body. Reject
+    // it before switching the response to an indefinite keep-alive stream.
+    if (rejectUnexpectedBody(req, res)) return;
     if (this.sseClients.size >= MAX_SSE_CLIENTS) {
       writeError(res, 503, 'stream_capacity', 'too many stream clients', { retry_after: 10 });
       return;
@@ -1196,15 +1562,17 @@ export class BridgeServer {
     writeError(res, 405, 'method_not_allowed', 'method not allowed', { allow: methods });
   }
 
-  handleError(res, error) {
+  handleError(res, error, req) {
     if (res.writableEnded) return;
-    const status = error?.code === 'body_too_large' ? 413 : statusForError(error);
+    const status = bodyReadStatus(error);
     const code = error?.code || (status === 500 ? 'internal_error' : 'request_failed');
     const message = status >= 500 ? (status === 502 ? 'Herdr session unavailable' : 'internal server error') : (error?.message || 'request failed');
     if (error?.retryAfter) res.setHeader('retry-after', String(error.retryAfter));
     if (status >= 500) this.logger.error?.(error);
+    if (error?.requestClose) res.setHeader?.('connection', 'close');
     writeError(res, status, code, message);
+    if (error?.requestClose) closeRequestAfterResponse(req, res);
   }
 }
 
-export { collectLanAddresses, readBody, writeJson, writeError, sseFrame, statusForError, normaliseOrigin };
+export { collectLanAddresses, readBody, writeJson, writeError, sseFrame, statusForError, normaliseOrigin, isLoopback };

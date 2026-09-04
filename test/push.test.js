@@ -120,6 +120,7 @@ test('relay delivery sends the normalized TTL and removes expired subscriptions'
   assert.equal(result.delivered, 1);
   assert.equal(calls[0].options.headers.ttl, String(MIN_TTL_SECONDS));
   assert.equal(JSON.parse(calls[0].options.body).ttl, MIN_TTL_SECONDS);
+  assert.equal(calls[0].options.redirect, 'error');
 
   manager.sender = async () => {
     const error = new Error('gone');

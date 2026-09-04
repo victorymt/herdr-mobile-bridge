@@ -177,6 +177,10 @@ export class PushManager {
     try {
       const response = await withTimeout(this.fetch(subscription.endpoint, {
         method: 'POST',
+        // A validated relay hostname must not be able to redirect the bridge
+        // to a private/local destination after the initial policy check.
+        // Built-in fetch treats `error` as a hard failure for any 3xx.
+        redirect: 'error',
         headers: {
           'content-type': 'application/json',
           'ttl': String(normaliseTtl(payload.ttl)),

@@ -1,9 +1,18 @@
 import { chmod, mkdir, readFile, writeFile, rename, lstat } from 'node:fs/promises';
 import { existsSync, readFileSync, mkdirSync, chmodSync, writeFileSync, renameSync, lstatSync } from 'node:fs';
-import { randomBytes, createECDH } from 'node:crypto';
+import { randomBytes, createECDH, createHash } from 'node:crypto';
 import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { parseAllowedCidrs } from './network-acl.js';
+import {
+  DEFAULT_RATE_PER_MINUTE,
+  DEFAULT_RATE_LIMIT_BURST,
+  DEFAULT_RATE_LIMIT_MAX_ENTRIES,
+  MAX_RATE_LIMIT_ENTRIES,
+  MIN_RATE_LIMIT_MAX_ENTRIES,
+  canonicalizeAddress,
+} from './rate-limit.js';
 
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 8787;
@@ -12,6 +21,12 @@ export const DEFAULT_PUSH_TIMEOUT_MS = 5000;
 export const MAX_PUSH_TIMEOUT_MS = 60_000;
 export const DEFAULT_CONFIG_NAME = 'herdr-mobile-bridge';
 export const DEFAULT_HERDR_SOCKET = '/tmp/herdr.sock';
+export const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 10_000;
+export const MAX_REQUEST_BODY_TIMEOUT_MS = 60_000;
+export const MAX_ALLOWED_CIDRS = 128;
+const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 
 /**
  * Keep the Bridge itself on loopback.  LAN access is intentionally provided
@@ -26,17 +41,30 @@ export function assertBridgeHost(host = DEFAULT_HOST) {
   if (value.toLowerCase() === 'localhost') return value;
   const family = isIP(value);
   if (family === 4 && Number(value.split('.')[0]) === 127) return value;
-  if (family === 6 && (value === '::1' || value.toLowerCase() === '::ffff:127.0.0.1')) return value;
+  if (family === 6) {
+    // Accept expanded and IPv4-mapped spellings of loopback while retaining
+    // the strict literal-IP boundary (no DNS names other than localhost).
+    const canonical = canonicalizeAddress(value);
+    if (canonical === '::1' || canonical.startsWith('127.')) return value;
+  }
   throw new TypeError('bridge host must be a loopback address');
 }
 
 /** LAN proxy listeners must bind one explicit IP, never a wildcard. */
 export function assertLanProxyHost(host) {
   const value = typeof host === 'string' ? host.trim() : '';
-  if (!value || /[\u0000-\u001f\u007f]/.test(value) || value === '0.0.0.0' || value === '::' || value === '*') {
+  if (!value || /[\u0000-\u001f\u007f]/.test(value) || value.includes('%') || value.includes('[') || value.includes(']') || value === '*') {
     throw new TypeError('LAN proxy host must be an explicit interface address');
   }
   if (!isIP(value)) throw new TypeError('LAN proxy host must be an IP address');
+  // Reject every textual spelling of an unspecified address, including an
+  // expanded IPv6 wildcard and an IPv4-mapped `::ffff:0.0.0.0`. Comparing the
+  // canonical form avoids accidentally binding the unauthenticated proxy to
+  // all interfaces through an equivalent representation.
+  const canonical = canonicalizeAddress(value);
+  if (canonical === '0.0.0.0' || canonical === '::' || canonical === 'unknown') {
+    throw new TypeError('LAN proxy host must be an explicit interface address');
+  }
   return value;
 }
 
@@ -45,6 +73,17 @@ export function firstEnv(env, names) {
   for (const name of names) {
     const value = env?.[name];
     if (typeof value === 'string' && value.trim() !== '') return value.trim();
+  }
+  return undefined;
+}
+
+// Unlike firstEnv(), this helper intentionally preserves an explicitly empty
+// environment value. It is used for settings where an embedder/launcher must
+// be able to clear a value inherited from a config file (for example an empty
+// allowed-origin override).
+function envValue(env, names) {
+  for (const name of names) {
+    if (hasOwn(env, name)) return env[name];
   }
   return undefined;
 }
@@ -93,7 +132,10 @@ export function resolvePaths(env = process.env, options = {}) {
       envHome,
     ),
   );
-  let socketPath = firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']);
+  const socketOptionExplicit = hasExplicitOption(options, 'socketPath');
+  let socketPath = socketOptionExplicit
+    ? assertConfiguredSocketPath(options.socketPath, true)
+    : firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']);
   if (!socketPath) {
     const session = firstEnv(env, ['HERDR_SESSION']);
     socketPath = session && session !== 'default'
@@ -105,10 +147,27 @@ export function resolvePaths(env = process.env, options = {}) {
   const tokenPath = join(configRoot, 'token');
   const secretPath = join(configRoot, 'bridge-secret');
   const vapidPath = join(configRoot, 'vapid.json');
-  const runtimePath = join(stateRoot, 'runtime.json');
-  const runtimeLockPath = join(stateRoot, 'runtime.lock');
-  const subscriptionsPath = join(stateRoot, 'subscriptions.json');
-  const dedupPath = join(stateRoot, 'dedup.json');
+  // State-file overrides are primarily useful to embedders that inject a
+  // configuration object into the detached launcher.  Keep them optional and
+  // resolve them exactly like the other filesystem roots so parent and child
+  // processes can share a custom (possibly relative) path without relying on
+  // their different working directories.
+  const pathOverride = (optionKey, envNames, fallback) => {
+    const supplied = options[optionKey] || firstEnv(env, envNames) || fallback;
+    return resolve(homePath(String(supplied), envHome));
+  };
+  const runtimePath = pathOverride('runtimePath', [
+    'HERDR_BRIDGE_RUNTIME_PATH', 'HERDR_RUNTIME_PATH', 'BRIDGE_RUNTIME_PATH',
+  ], join(stateRoot, 'runtime.json'));
+  const runtimeLockPath = pathOverride('runtimeLockPath', [
+    'HERDR_BRIDGE_RUNTIME_LOCK_PATH', 'HERDR_RUNTIME_LOCK_PATH', 'BRIDGE_RUNTIME_LOCK_PATH',
+  ], join(stateRoot, 'runtime.lock'));
+  const subscriptionsPath = pathOverride('subscriptionsPath', [
+    'HERDR_BRIDGE_SUBSCRIPTIONS_PATH', 'HERDR_SUBSCRIPTIONS_PATH', 'BRIDGE_SUBSCRIPTIONS_PATH',
+  ], join(stateRoot, 'subscriptions.json'));
+  const dedupPath = pathOverride('dedupPath', [
+    'HERDR_BRIDGE_DEDUP_PATH', 'HERDR_DEDUP_PATH', 'BRIDGE_DEDUP_PATH',
+  ], join(stateRoot, 'dedup.json'));
   return {
     configDir: configRoot,
     stateDir: stateRoot,
@@ -125,8 +184,24 @@ export function resolvePaths(env = process.env, options = {}) {
 }
 
 export function parsePort(value, fallback = DEFAULT_PORT) {
-  if (value === undefined || value === null || value === '') return fallback;
-  const number = Number(value);
+  if (value === undefined || value === null) return fallback;
+  let candidate = value;
+  if (typeof candidate === 'string') {
+    candidate = candidate.trim();
+    // Preserve the historical empty-string fallback while treating strings
+    // containing only whitespace the same way.  This is important for an
+    // explicitly empty CLI/environment value and avoids Number(' ') becoming
+    // the unrelated ephemeral port 0.
+    if (candidate === '') return fallback;
+  } else if (typeof candidate === 'boolean' || typeof candidate === 'bigint'
+    || typeof candidate === 'symbol' || (typeof candidate === 'object' && candidate !== null)) {
+    // JavaScript's Number() coercion would otherwise accept values such as
+    // false (0), true (1), [] (0), or [8787] (8787).  Listener ports must be
+    // explicit numeric values or numeric strings, never truthiness/coercion
+    // accidents.
+    throw new Error(`invalid bridge port: ${String(value)}`);
+  }
+  const number = Number(candidate);
   // Port 0 is useful for embedded callers/tests that ask the OS to allocate
   // an ephemeral listener; environment/configured production ports remain
   // constrained to the normal 1..65535 range by callers when needed.
@@ -152,10 +227,272 @@ function parseBoundedPositive(value, fallback, maximum = Number.MAX_SAFE_INTEGER
   return Math.min(Math.max(1, Math.floor(number)), upper);
 }
 
+function hasOwn(value, key) {
+  return value !== null && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+// An explicitly supplied empty CLI value is different from an omitted option:
+// `--port` should continue using the normal default, while `--port=` should
+// reach validation and produce a clear error.  Null/undefined retain the
+// historical "not supplied" semantics for programmatic callers.
+function hasExplicitOption(options, key) {
+  return hasOwn(options, key) && options[key] !== undefined && options[key] !== null;
+}
+
+function parseConfiguredPort(value, fallback, label, explicit = false) {
+  if (explicit && typeof value === 'string' && value.trim() === '') {
+    throw new TypeError(`${label} must not be empty`);
+  }
+  return parsePort(value, fallback);
+}
+
+function assertConfiguredSocketPath(value, explicit = false) {
+  if (explicit && (typeof value !== 'string' || value.trim() === '')) {
+    throw new TypeError('socket path must not be empty');
+  }
+  return value;
+}
+
+/** Resolve a setting while preserving an explicitly supplied empty value. */
+function configuredSetting(options, env, fileConfig, optionKey, envNames = [], fileKey = optionKey) {
+  if (hasOwn(options, optionKey) && options[optionKey] !== undefined) {
+    return { value: options[optionKey], explicit: true, source: 'options' };
+  }
+  for (const name of envNames) {
+    if (hasOwn(env, name)) return { value: env[name], explicit: true, source: 'env' };
+  }
+  if (hasOwn(fileConfig, fileKey)) return { value: fileConfig[fileKey], explicit: true, source: 'file' };
+  return { value: undefined, explicit: false, source: undefined };
+}
+
+function parseSecurityInteger(setting, fallback, maximum, label, minimum = 1) {
+  if (!setting.explicit) return fallback;
+  const number = Number(setting.value);
+  if (!Number.isInteger(number) || number < minimum || number > maximum) {
+    if (minimum > 1) {
+      throw new TypeError(`${label} must be between ${minimum} and ${maximum}`);
+    }
+    if (!Number.isInteger(number) || number <= 0) {
+      throw new TypeError(`${label} must be a positive integer`);
+    }
+    throw new TypeError(`${label} must be between 1 and ${maximum}`);
+  }
+  return number;
+}
+
+function securitySettings(options, env, fileConfig, lanProxyHost) {
+  const aclSetting = configuredSetting(
+    options,
+    env,
+    fileConfig,
+    'lanProxyAllowedCidrs',
+    ['HERDR_LAN_PROXY_ALLOWED_CIDRS', 'BRIDGE_LAN_PROXY_ALLOWED_CIDRS'],
+  );
+  const lanProxyAllowedCidrs = aclSetting.explicit
+    ? parseAllowedCidrs(aclSetting.value, { maxEntries: MAX_ALLOWED_CIDRS })
+    : undefined;
+  if (lanProxyAllowedCidrs && !lanProxyHost) {
+    throw new TypeError('lanProxyAllowedCidrs requires lanProxyHost');
+  }
+
+  const rateLimitPerMinute = parseSecurityInteger(
+    configuredSetting(options, env, fileConfig, 'rateLimitPerMinute', [
+      'HERDR_BRIDGE_RATE_LIMIT_PER_MINUTE', 'BRIDGE_RATE_LIMIT_PER_MINUTE',
+    ]),
+    DEFAULT_RATE_PER_MINUTE,
+    10_000,
+    'rateLimitPerMinute',
+  );
+  const rateLimitBurstSetting = configuredSetting(options, env, fileConfig, 'rateLimitBurst', [
+      'HERDR_BRIDGE_RATE_LIMIT_BURST', 'BRIDGE_RATE_LIMIT_BURST',
+    ]);
+  const rateLimitBurst = parseSecurityInteger(
+    rateLimitBurstSetting,
+    Math.min(DEFAULT_RATE_LIMIT_BURST, rateLimitPerMinute),
+    rateLimitPerMinute,
+    'rateLimitBurst',
+  );
+  const rateLimitMaxEntries = parseSecurityInteger(
+    configuredSetting(options, env, fileConfig, 'rateLimitMaxEntries', [
+      'HERDR_BRIDGE_RATE_LIMIT_MAX_ENTRIES', 'BRIDGE_RATE_LIMIT_MAX_ENTRIES',
+    ]),
+    DEFAULT_RATE_LIMIT_MAX_ENTRIES,
+    MAX_RATE_LIMIT_ENTRIES,
+    'rateLimitMaxEntries',
+    MIN_RATE_LIMIT_MAX_ENTRIES,
+  );
+  const requestBodyTimeoutMs = parseSecurityInteger(
+    configuredSetting(options, env, fileConfig, 'requestBodyTimeoutMs', [
+      'HERDR_BRIDGE_REQUEST_BODY_TIMEOUT_MS', 'BRIDGE_REQUEST_BODY_TIMEOUT_MS',
+    ]),
+    DEFAULT_REQUEST_BODY_TIMEOUT_MS,
+    MAX_REQUEST_BODY_TIMEOUT_MS,
+    'requestBodyTimeoutMs',
+  );
+  return {
+    lanProxyAllowedCidrs,
+    rateLimitPerMinute,
+    rateLimitBurst,
+    rateLimitMaxEntries,
+    requestBodyTimeoutMs,
+  };
+}
+
+function fingerprintPayload(config = {}) {
+  const normalizeList = (value, { split = false, max = 128 } = {}) => {
+    if (value === undefined || value === null) return split ? [] : null;
+    // String-valued settings use commas as the documented list separator.
+    // Keep that same interpretation when an embedder supplies an array: an
+    // item such as `['https://a.example,https://b.example']` must fingerprint
+    // identically to the serialized child environment value
+    // `'https://a.example,https://b.example'`.
+    const values = Array.isArray(value)
+      ? (split ? value.flatMap((item) => String(item ?? '').split(',')) : value)
+      : (split ? String(value).split(',') : [value]);
+    return values
+      .map((item) => String(item ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim())
+      .filter(Boolean)
+      .slice(0, max)
+      .sort();
+  };
+  let allowedCidrs = null;
+  if (config.lanProxyAllowedCidrs !== undefined) {
+    // Fingerprint the effective policy rather than the JavaScript container
+    // shape. This keeps equivalent array/string forms stable while ensuring a
+    // malformed explicitly supplied value cannot collapse to the ACL-disabled
+    // fingerprint and accidentally reuse an old process.
+    try {
+      allowedCidrs = parseAllowedCidrs(config.lanProxyAllowedCidrs, { maxEntries: MAX_ALLOWED_CIDRS }).sort();
+    } catch {
+      // Keep a directly injected malformed config distinguishable from an
+      // omitted ACL without echoing an unbounded value into the fingerprint
+      // payload. Normal loaders still throw the original validation error
+      // before this helper is reached.
+      allowedCidrs = { invalid: String(config.lanProxyAllowedCidrs).slice(0, 256) };
+    }
+  }
+  // Fingerprints describe effective settings, rather than the incidental
+  // shape of an object supplied by an embedder.  `loadConfig()` fills these
+  // defaults already, but detached launchers may receive a minimal injected
+  // config.  Applying the same defaults here keeps the parent marker and the
+  // child process on one stable identity while preserving an explicit invalid
+  // value as a distinct (non-reusable) sentinel.
+  const blank = (value) => typeof value === 'string' && value.trim() === '';
+  const effectiveNumber = (value, fallback, maximum = Number.MAX_SAFE_INTEGER) => {
+    if (value === undefined || value === null || blank(value)) return fallback;
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0 || number > maximum) {
+      return { invalid: String(value).slice(0, 128) };
+    }
+    return number;
+  };
+  const effectiveInteger = (value, fallback, maximum = Number.MAX_SAFE_INTEGER, minimum = 1) => {
+    if (value === undefined || value === null) return fallback;
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < minimum || number > maximum) {
+      return { invalid: String(value).slice(0, 128) };
+    }
+    return number;
+  };
+  const effectiveRate = effectiveInteger(config.rateLimitPerMinute, DEFAULT_RATE_PER_MINUTE, 10_000);
+  const effectiveBurst = config.rateLimitBurst === undefined || config.rateLimitBurst === null
+    ? (typeof effectiveRate === 'number' ? Math.min(DEFAULT_RATE_LIMIT_BURST, effectiveRate) : effectiveRate)
+    : effectiveInteger(config.rateLimitBurst, DEFAULT_RATE_LIMIT_BURST, 10_000);
+  const effectiveLanHost = typeof config.lanProxyHost === 'string'
+    ? config.lanProxyHost.trim() || null
+    : (config.lanProxyHost || null);
+  const proxyEnabled = Boolean(effectiveLanHost);
+  const effectiveTargetHost = proxyEnabled
+    ? (config.lanProxyTargetHost === undefined || config.lanProxyTargetHost === null || blank(config.lanProxyTargetHost)
+      ? (config.host ?? DEFAULT_HOST)
+      : config.lanProxyTargetHost)
+    : null;
+  const effectiveHost = config.host === undefined || config.host === null || blank(config.host)
+    ? DEFAULT_HOST
+    : config.host;
+  // `parsePort()` intentionally permits zero for an ephemeral embedded
+  // listener. Keep that value in the fingerprint so a marker created by an
+  // embedder is identical to the detached child's resolved configuration.
+  const effectivePort = config.port === undefined || config.port === null || blank(config.port)
+    ? DEFAULT_PORT
+    : (() => {
+      const number = Number(config.port);
+      return Number.isInteger(number) && number >= 0 && number <= 65_535
+        ? number
+        : { invalid: String(config.port).slice(0, 128) };
+    })();
+  const effectiveLanPort = proxyEnabled
+    ? (config.lanProxyPort === undefined || config.lanProxyPort === null || blank(config.lanProxyPort)
+      ? DEFAULT_LAN_PROXY_PORT
+      : effectiveInteger(config.lanProxyPort, DEFAULT_LAN_PROXY_PORT, 65_535))
+    : null;
+  const effectiveSocketPath = config.socketPath === undefined || config.socketPath === null || blank(config.socketPath)
+    ? DEFAULT_HERDR_SOCKET
+    : config.socketPath;
+  const effectiveRequestTimeout = effectiveNumber(config.requestTimeoutMs, DEFAULT_REQUEST_TIMEOUT_MS);
+  const effectiveMaxBody = effectiveNumber(config.maxBodyBytes, DEFAULT_MAX_BODY_BYTES);
+  const effectiveSessionTtl = effectiveNumber(config.sessionTtlMs, DEFAULT_SESSION_TTL_MS);
+  const effectiveBodyTimeout = effectiveInteger(config.requestBodyTimeoutMs, DEFAULT_REQUEST_BODY_TIMEOUT_MS, MAX_REQUEST_BODY_TIMEOUT_MS);
+  const effectiveMaxEntries = effectiveInteger(config.rateLimitMaxEntries, DEFAULT_RATE_LIMIT_MAX_ENTRIES, MAX_RATE_LIMIT_ENTRIES, MIN_RATE_LIMIT_MAX_ENTRIES);
+  const effectivePushTimeout = (() => {
+    if (config.pushTimeoutMs === undefined || config.pushTimeoutMs === null || blank(config.pushTimeoutMs)) return DEFAULT_PUSH_TIMEOUT_MS;
+    const number = Number(config.pushTimeoutMs);
+    if (!Number.isFinite(number) || number <= 0) return DEFAULT_PUSH_TIMEOUT_MS;
+    return Math.min(MAX_PUSH_TIMEOUT_MS, Math.max(1, Math.floor(number)));
+  })();
+  const effectiveAllowCustomPushEndpoints = config.allowCustomPushEndpoints !== undefined
+    ? config.allowCustomPushEndpoints === true
+    : config.allowCustomEndpoints === true;
+  const effectiveAllowPushRelay = config.allowPushRelay !== undefined
+    ? config.allowPushRelay === true
+    : config.allowRelay === true;
+  const effectivePushAllowlist = config.pushEndpointAllowlist
+    ?? config.allowedPushEndpointHosts;
+  const lanProxyHostRaw = effectiveLanHost;
+  const canonicalAddress = (value) => {
+    if (!value || typeof value !== 'string') return value;
+    const normalized = canonicalizeAddress(value);
+    return normalized === 'unknown' ? value : normalized;
+  };
+  const lanProxyHost = canonicalAddress(lanProxyHostRaw);
+  const bridgeHost = canonicalAddress(effectiveHost);
+  const targetHost = canonicalAddress(effectiveTargetHost);
+  return {
+    schema: 1,
+    host: bridgeHost,
+    port: effectivePort,
+    socketPath: effectiveSocketPath,
+    lanProxyHost,
+    lanProxyPort: lanProxyHost ? effectiveLanPort : null,
+    lanProxyAllowedCidrs: allowedCidrs,
+    rateLimitPerMinute: effectiveRate,
+    rateLimitBurst: effectiveBurst,
+    rateLimitMaxEntries: effectiveMaxEntries,
+    requestBodyTimeoutMs: effectiveBodyTimeout,
+    requestTimeoutMs: effectiveRequestTimeout,
+    maxBodyBytes: effectiveMaxBody,
+    sessionTtlMs: effectiveSessionTtl,
+    allowedOrigin: normalizeList(config.allowedOrigin, { split: true }),
+    cookieSecure: config.cookieSecure === true,
+    allowSseQueryToken: config.allowSseQueryToken === true,
+    healthDetails: config.healthDetails === true,
+    allowCustomPushEndpoints: effectiveAllowCustomPushEndpoints,
+    allowPushRelay: effectiveAllowPushRelay,
+    pushTimeoutMs: effectivePushTimeout,
+    pushEndpointAllowlist: normalizeList(effectivePushAllowlist, { split: true }),
+    lanProxyTargetHost: targetHost,
+  };
+}
+
+/** Stable hash of non-secret settings that determine the running listener. */
+export function configFingerprint(config = {}) {
+  return createHash('sha256').update(JSON.stringify(fingerprintPayload(config))).digest('hex');
+}
+
 function pushEndpointAllowlistValue(options, env, fileConfig) {
   return options.pushEndpointAllowlist
     ?? options.allowedPushEndpointHosts
-    ?? firstEnv(env, [
+    ?? envValue(env, [
       'HERDR_BRIDGE_PUSH_ENDPOINT_ALLOWLIST',
       'BRIDGE_PUSH_ENDPOINT_ALLOWLIST',
       'HERDR_PUSH_ENDPOINT_ALLOWLIST',
@@ -394,7 +731,8 @@ export async function loadConfig(options = {}) {
   const paths = resolvePaths(env, options);
   await ensurePrivateDir(paths.configDir);
   await ensurePrivateDir(paths.stateDir);
-  const fileConfig = objectValue(await readJson(paths.bridgeConfigPath));
+  const injected = options.ignoreFileConfig === true || firstEnv(env, ['HERDR_BRIDGE_CONFIG_INJECTED']) === '1';
+  const fileConfig = injected ? {} : objectValue(await readJson(paths.bridgeConfigPath));
 
   const tokenFromEnv = firstEnv(env, ['HERDR_BRIDGE_TOKEN', 'BRIDGE_TOKEN']);
   let token = options.token || tokenFromEnv || (await readText(paths.tokenPath));
@@ -432,28 +770,68 @@ export async function loadConfig(options = {}) {
     await writePrivate(paths.vapidPath, JSON.stringify(vapid, null, 2));
   }
 
-  const host = assertBridgeHost(options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST);
-  const port = parsePort(options.port ?? firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port, DEFAULT_PORT);
-  const lanProxyPort = parsePort(options.lanProxyPort ?? firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
-  const configuredLanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
-  const lanProxyHost = configuredLanProxyHost ? assertLanProxyHost(configuredLanProxyHost) : undefined;
+  const hostValue = hasExplicitOption(options, 'host')
+    ? options.host
+    : (firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST);
+  const host = assertBridgeHost(hostValue);
+  const portExplicit = hasExplicitOption(options, 'port');
+  const portValue = portExplicit
+    ? options.port
+    : (firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port);
+  const port = parseConfiguredPort(portValue, DEFAULT_PORT, 'bridge port', portExplicit);
+  const lanPortExplicit = hasExplicitOption(options, 'lanProxyPort');
+  const lanPortValue = lanPortExplicit
+    ? options.lanProxyPort
+    : (firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort);
+  const lanProxyPort = parseConfiguredPort(lanPortValue, DEFAULT_LAN_PROXY_PORT, 'LAN proxy port', lanPortExplicit);
+  const lanHostExplicit = hasExplicitOption(options, 'lanProxyHost');
+  const configuredLanProxyHost = lanHostExplicit
+    ? options.lanProxyHost
+    : (firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost);
+  const lanProxyHost = lanHostExplicit
+    ? assertLanProxyHost(configuredLanProxyHost)
+    : (configuredLanProxyHost ? assertLanProxyHost(configuredLanProxyHost) : undefined);
   if (lanProxyHost && (lanProxyPort < 1 || lanProxyPort === port)) {
     throw new Error('LAN proxy port must be between 1 and 65535 and differ from bridge port');
   }
-  const socketPath = resolve(homePath(options.socketPath || firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath, firstEnv(env, ['HOME', 'USERPROFILE']) || homedir()));
-  const allowedOrigin = options.allowedOrigin || firstEnv(env, ['HERDR_BRIDGE_ALLOWED_ORIGIN', 'BRIDGE_ALLOWED_ORIGIN']) || fileConfig.allowedOrigin || '';
-  const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
-  const requestTimeoutMs = Number(options.requestTimeoutMs ?? fileConfig.requestTimeoutMs ?? 5000);
-  const maxBodyBytes = Number(options.maxBodyBytes ?? fileConfig.maxBodyBytes ?? 1024 * 1024);
+  const configuredTargetHost = options.lanProxyTargetHost
+    ?? envValue(env, ['HERDR_BRIDGE_LAN_PROXY_TARGET_HOST', 'BRIDGE_LAN_PROXY_TARGET_HOST'])
+    ?? fileConfig.lanProxyTargetHost;
+  const lanProxyTargetHost = configuredTargetHost === undefined || configuredTargetHost === null || configuredTargetHost === ''
+    ? undefined
+    : assertBridgeHost(configuredTargetHost);
+  const socketExplicit = hasExplicitOption(options, 'socketPath');
+  const configuredSocketPath = socketExplicit
+    ? assertConfiguredSocketPath(options.socketPath, true)
+    : (firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath);
+  const socketPath = resolve(homePath(configuredSocketPath, firstEnv(env, ['HOME', 'USERPROFILE']) || homedir()));
+  const allowedOrigin = options.allowedOrigin
+    ?? envValue(env, ['HERDR_BRIDGE_ALLOWED_ORIGIN', 'BRIDGE_ALLOWED_ORIGIN'])
+    ?? fileConfig.allowedOrigin
+    ?? '';
+  const sessionTtlMs = Number(options.sessionTtlMs
+    ?? envValue(env, ['HERDR_BRIDGE_SESSION_TTL_MS', 'BRIDGE_SESSION_TTL_MS'])
+    ?? fileConfig.sessionTtlMs
+    ?? DEFAULT_SESSION_TTL_MS);
+  const requestTimeoutMs = Number(options.requestTimeoutMs
+    ?? envValue(env, ['HERDR_BRIDGE_REQUEST_TIMEOUT_MS', 'BRIDGE_REQUEST_TIMEOUT_MS'])
+    ?? fileConfig.requestTimeoutMs
+    ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const maxBodyBytes = Number(options.maxBodyBytes
+    ?? envValue(env, ['HERDR_BRIDGE_MAX_BODY_BYTES', 'BRIDGE_MAX_BODY_BYTES'])
+    ?? fileConfig.maxBodyBytes
+    ?? DEFAULT_MAX_BODY_BYTES);
+  const security = securitySettings(options, env, fileConfig, lanProxyHost);
   const pushPolicy = pushPolicyValues(options, env, fileConfig);
   const vapidSubject = vapidSubjectValue(options, env, fileConfig, vapid);
   const finalVapid = { ...vapid, subject: vapidSubject };
-  return {
+  const result = {
     ...paths,
     host,
     port,
     lanProxyHost,
     lanProxyPort,
+    lanProxyTargetHost,
     socketPath,
     token,
     secret,
@@ -462,6 +840,7 @@ export async function loadConfig(options = {}) {
     sessionTtlMs: Number.isFinite(sessionTtlMs) && sessionTtlMs > 0 ? sessionTtlMs : 7 * 24 * 60 * 60 * 1000,
     requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 5000,
     maxBodyBytes: Number.isFinite(maxBodyBytes) && maxBodyBytes > 0 ? maxBodyBytes : 1024 * 1024,
+    ...security,
     ...pushPolicy,
     cookieSecure: parseBoolean(options.cookieSecure ?? firstEnv(env, ['HERDR_BRIDGE_COOKIE_SECURE', 'BRIDGE_COOKIE_SECURE']) ?? fileConfig.cookieSecure, false),
     healthDetails: parseBoolean(options.healthDetails ?? firstEnv(env, ['HERDR_BRIDGE_HEALTH_DETAILS', 'BRIDGE_HEALTH_DETAILS']) ?? fileConfig.healthDetails, false),
@@ -469,6 +848,8 @@ export async function loadConfig(options = {}) {
     version: options.version || fileConfig.version || '0.1.0',
     vapidSubject,
   };
+  result.configFingerprint = configFingerprint(result);
+  return result;
 }
 
 /** Synchronous counterpart used by launcher startup checks. */
@@ -478,7 +859,8 @@ export function loadConfigSync(options = {}) {
   ensurePrivateDirSync(paths.configDir);
   ensurePrivateDirSync(paths.stateDir);
   let fileConfig = {};
-  if (existsSync(paths.bridgeConfigPath)) {
+  const injected = options.ignoreFileConfig === true || firstEnv(env, ['HERDR_BRIDGE_CONFIG_INJECTED']) === '1';
+  if (!injected && existsSync(paths.bridgeConfigPath)) {
     try {
       fileConfig = objectValue(JSON.parse(readFileSync(paths.bridgeConfigPath, 'utf8')));
     } catch (error) {
@@ -516,36 +898,77 @@ export function loadConfigSync(options = {}) {
   if (resolvedVapid.generated && options.persistGenerated !== false) {
     writePrivateSync(paths.vapidPath, JSON.stringify(vapid, null, 2));
   }
-  const host = assertBridgeHost(options.host || firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST);
-  const port = parsePort(options.port ?? firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port, DEFAULT_PORT);
-  const lanProxyPort = parsePort(options.lanProxyPort ?? firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort, DEFAULT_LAN_PROXY_PORT);
-  const configuredLanProxyHost = options.lanProxyHost || firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost;
-  const lanProxyHost = configuredLanProxyHost ? assertLanProxyHost(configuredLanProxyHost) : undefined;
+  const hostValue = hasExplicitOption(options, 'host')
+    ? options.host
+    : (firstEnv(env, ['HERDR_BRIDGE_HOST', 'BRIDGE_HOST']) || fileConfig.host || DEFAULT_HOST);
+  const host = assertBridgeHost(hostValue);
+  const portExplicit = hasExplicitOption(options, 'port');
+  const portValue = portExplicit
+    ? options.port
+    : (firstEnv(env, ['HERDR_BRIDGE_PORT', 'BRIDGE_PORT']) ?? fileConfig.port);
+  const port = parseConfiguredPort(portValue, DEFAULT_PORT, 'bridge port', portExplicit);
+  const lanPortExplicit = hasExplicitOption(options, 'lanProxyPort');
+  const lanPortValue = lanPortExplicit
+    ? options.lanProxyPort
+    : (firstEnv(env, ['HERDR_LAN_PROXY_PORT', 'BRIDGE_LAN_PROXY_PORT']) ?? fileConfig.lanProxyPort);
+  const lanProxyPort = parseConfiguredPort(lanPortValue, DEFAULT_LAN_PROXY_PORT, 'LAN proxy port', lanPortExplicit);
+  const lanHostExplicit = hasExplicitOption(options, 'lanProxyHost');
+  const configuredLanProxyHost = lanHostExplicit
+    ? options.lanProxyHost
+    : (firstEnv(env, ['HERDR_LAN_PROXY_HOST', 'BRIDGE_LAN_PROXY_HOST']) || fileConfig.lanProxyHost);
+  const lanProxyHost = lanHostExplicit
+    ? assertLanProxyHost(configuredLanProxyHost)
+    : (configuredLanProxyHost ? assertLanProxyHost(configuredLanProxyHost) : undefined);
   if (lanProxyHost && (lanProxyPort < 1 || lanProxyPort === port)) {
     throw new Error('LAN proxy port must be between 1 and 65535 and differ from bridge port');
   }
+  const configuredTargetHost = options.lanProxyTargetHost
+    ?? envValue(env, ['HERDR_BRIDGE_LAN_PROXY_TARGET_HOST', 'BRIDGE_LAN_PROXY_TARGET_HOST'])
+    ?? fileConfig.lanProxyTargetHost;
+  const lanProxyTargetHost = configuredTargetHost === undefined || configuredTargetHost === null || configuredTargetHost === ''
+    ? undefined
+    : assertBridgeHost(configuredTargetHost);
   const home = firstEnv(env, ['HOME', 'USERPROFILE']) || homedir();
-  const socketPath = resolve(homePath(options.socketPath || firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath, home));
-  const sessionTtlMs = Number(options.sessionTtlMs ?? fileConfig.sessionTtlMs ?? 7 * 24 * 60 * 60 * 1000);
-  const requestTimeoutMs = Number(options.requestTimeoutMs ?? fileConfig.requestTimeoutMs ?? 5000);
-  const maxBodyBytes = Number(options.maxBodyBytes ?? fileConfig.maxBodyBytes ?? 1024 * 1024);
+  const socketExplicit = hasExplicitOption(options, 'socketPath');
+  const configuredSocketPath = socketExplicit
+    ? assertConfiguredSocketPath(options.socketPath, true)
+    : (firstEnv(env, ['HERDR_SOCKET_PATH', 'BRIDGE_SOCKET_PATH']) || fileConfig.socketPath || paths.socketPath);
+  const socketPath = resolve(homePath(configuredSocketPath, home));
+  const sessionTtlMs = Number(options.sessionTtlMs
+    ?? envValue(env, ['HERDR_BRIDGE_SESSION_TTL_MS', 'BRIDGE_SESSION_TTL_MS'])
+    ?? fileConfig.sessionTtlMs
+    ?? DEFAULT_SESSION_TTL_MS);
+  const requestTimeoutMs = Number(options.requestTimeoutMs
+    ?? envValue(env, ['HERDR_BRIDGE_REQUEST_TIMEOUT_MS', 'BRIDGE_REQUEST_TIMEOUT_MS'])
+    ?? fileConfig.requestTimeoutMs
+    ?? DEFAULT_REQUEST_TIMEOUT_MS);
+  const maxBodyBytes = Number(options.maxBodyBytes
+    ?? envValue(env, ['HERDR_BRIDGE_MAX_BODY_BYTES', 'BRIDGE_MAX_BODY_BYTES'])
+    ?? fileConfig.maxBodyBytes
+    ?? DEFAULT_MAX_BODY_BYTES);
+  const security = securitySettings(options, env, fileConfig, lanProxyHost);
   const pushPolicy = pushPolicyValues(options, env, fileConfig);
   const vapidSubject = vapidSubjectValue(options, env, fileConfig, vapid);
   const finalVapid = { ...vapid, subject: vapidSubject };
-  return {
+  const result = {
     ...paths,
     host,
     port,
     lanProxyHost,
     lanProxyPort,
+    lanProxyTargetHost,
     socketPath,
     token,
     secret,
     vapid: finalVapid,
-    allowedOrigin: options.allowedOrigin || firstEnv(env, ['HERDR_BRIDGE_ALLOWED_ORIGIN', 'BRIDGE_ALLOWED_ORIGIN']) || fileConfig.allowedOrigin || '',
+    allowedOrigin: options.allowedOrigin
+      ?? envValue(env, ['HERDR_BRIDGE_ALLOWED_ORIGIN', 'BRIDGE_ALLOWED_ORIGIN'])
+      ?? fileConfig.allowedOrigin
+      ?? '',
     sessionTtlMs: Number.isFinite(sessionTtlMs) && sessionTtlMs > 0 ? sessionTtlMs : 7 * 24 * 60 * 60 * 1000,
     requestTimeoutMs: Number.isFinite(requestTimeoutMs) && requestTimeoutMs > 0 ? requestTimeoutMs : 5000,
     maxBodyBytes: Number.isFinite(maxBodyBytes) && maxBodyBytes > 0 ? maxBodyBytes : 1024 * 1024,
+    ...security,
     ...pushPolicy,
     cookieSecure: parseBoolean(options.cookieSecure ?? firstEnv(env, ['HERDR_BRIDGE_COOKIE_SECURE', 'BRIDGE_COOKIE_SECURE']) ?? fileConfig.cookieSecure, false),
     healthDetails: parseBoolean(options.healthDetails ?? firstEnv(env, ['HERDR_BRIDGE_HEALTH_DETAILS', 'BRIDGE_HEALTH_DETAILS']) ?? fileConfig.healthDetails, false),
@@ -553,6 +976,8 @@ export function loadConfigSync(options = {}) {
     version: options.version || fileConfig.version || '0.1.0',
     vapidSubject,
   };
+  result.configFingerprint = configFingerprint(result);
+  return result;
 }
 
 export { ensurePrivateDir, writePrivate, hardenPrivateFile, hardenPrivateFileSync };

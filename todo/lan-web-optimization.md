@@ -50,20 +50,22 @@ Herdr Unix socket
   `push_timeout`，不会无限占用事件处理。
 - 端点策略同时在 StateStore 注册/加载、PushManager 通知循环和最终 HTTP 发送边界复核，
   不能通过注入旧状态或直接调用发送适配器绕过。
+- 自定义 hostname 不做运行时 DNS 解析，因而不能单独抵御 DNS rebinding；启用自定义端点时
+  必须使用固定解析的受信 relay，并在出口防火墙/代理层重复阻断私网、环回和元数据网段。
 
 ## 2. 分阶段实施清单
 
 ### 阶段 1：LAN MVP（最高优先级）
 
 - [x] 在 `src/config.js` 支持 LAN 绑定地址/端口配置（设置 host 即启用，默认入口端口 `18787`），并校验端口范围及其不能与 Bridge 端口相同。
-- [ ] 增加显式允许网段 ACL/防火墙规则配置；当前只校验显式绑定地址，访问控制仍由主机防火墙负责。
+- [x] 增加显式允许网段 ACL 配置；内置 Node proxy 按真实 TCP 来源执行 CIDR deny-by-default，拒绝直接关闭连接。主机防火墙规则仍需按系统手工配置。
 - [x] 默认 Bridge 保持监听 `127.0.0.1:8787`；LAN 入口默认使用 `18787`，避免与内部端口混淆。
 - [x] 在 `src/launcher.js` 与 `src/index.js` 管理内置 LAN proxy 生命周期：启动、停止、重复启动复用、异常退出记录和清理。
 - [x] 为内置 proxy 增加健康检查，确认端口已监听且后端 Bridge 可达后再报告成功。
 - [x] 启动进程使用 PID 身份校验（进程启动时间/入口匹配），避免旧 runtime marker 误复用。
 - [x] 增加 LAN 地址发现/展示和最小连通性检查；地址变化时在向导中重新列出候选地址。
 - [x] 入口实现：内置 Node LAN proxy 绑定指定 LAN IP，转发到 `127.0.0.1:8787`。
-  - [ ] 可选 Caddy：绑定 LAN IP，反代到 `127.0.0.1:8787`，按需启用 Basic Auth（需用户自行配置 HTTPS/证书）。
+  - [x] 已提供可选 Caddy LAN HTTPS/Basic Auth 配置示例（`docs/Caddyfile.lan.example`）；实际证书信任和部署仍需用户验收。
   - [x] 可选 socat：文档提供 `TCP-LISTEN:18787,bind=<LAN_IP>,reuseaddr,fork` 转发命令。
 - [x] 已更新 `README.md` 与 `docs/socat-phone-connection.html`，统一 `18787 → 8787` 的说明、启动/停止命令和故障排查。
 - [ ] 用手机在 VPN 关闭、VPN 开启两种状态验证 LAN 访问；记录 VPN 的 “Allow LAN traffic / 允许局域网 / Bypass private networks / 本地网络共享” 开关。
@@ -87,7 +89,7 @@ Herdr Unix socket
 - [x] `src/auth.js` 默认关闭 SSE query token；正常浏览器连接使用 cookie/session，避免长期 token 出现在历史记录、日志和代理 URL 中。
 - [x] `/healthz` 默认只返回最小 `ok/service` 状态；详细运行信息必须显式开启 `healthDetails`。
 - [x] 登录尝试按来源限流；控制请求有按窗格/全局 in-flight 上限；Herdr socket 请求有超时；SSE 客户端数量和队列有界。
-- [ ] 若要达到严格的按 session/IP 统一限流及 HTTP 请求体超时，还需在反向代理或后续版本补充（当前实现已限制 body 大小和关键并发）。
+- [x] 按 session/IP 的统一令牌桶限流及 HTTP 请求体绝对超时已实现：API 默认 120 次/分钟、突发 30，登录每来源 5 次/分钟，body 默认 10 秒且上限 60 秒；透明 L4 proxy 的真实手机 IP 连接级限制与外部 L7 proxy 边界已记录。
 - [x] `src/event-hook.js` 修复 Bridge 启动竞态；启动失败或连接断开时最多有限重试，并输出脱敏原因。
 - [x] `src/event-bus.js` 在 replay 超出 256 条事件窗口时显式返回 `resync_required`，不静默丢事件。
 - [x] SSE 序号携带进程代次/generation，避免 Bridge 重启后序号重置造成误判。
@@ -145,10 +147,10 @@ Herdr Unix socket
 
 | 文件 | 责任 |
 | --- | --- |
-| `src/config.js` | LAN 开关（设置 host 即启用）、绑定地址、LAN 端口和上限校验；网段 ACL 仍待补充 |
+| `src/config.js` | LAN 开关、绑定地址/端口、CIDR ACL、限流/请求体超时配置和启动指纹 |
 | `src/launcher.js` | LAN proxy 生命周期、健康检查、PID 身份和运行标记 |
 | `src/lan-proxy.js`（已实现） | 用 Node 实现跨平台 LAN 转发，作为默认入口；外部 socat/Caddy 为可选替代 |
-| `src/server.js` | DTO allowlist、healthz、限流、超时、SSE 背压 |
+| `src/server.js` | DTO allowlist、healthz、session/IP 限流、请求体超时、SSE 背压 |
 | `src/auth.js` | query token 限制、session/CSRF；一次性配对码为可选后续项 |
 | `src/event-hook.js` | 启动竞态重试、错误和日志脱敏 |
 | `src/event-bus.js` | replay gap、`resync_required` 和重启代次 |
@@ -164,8 +166,8 @@ Herdr Unix socket
 ### 已知基线
 
 - [x] `npm run check`：通过。
-- [x] `npm audit --omit=dev`：0 vulnerabilities。
-- [x] `npm test`：默认并行 runner 已通过 75/75（2026-09-03，含 LAN 配置/发现、失败清理、推送 SSRF/超时和 Web/PWA 回归）。
+- [x] `npm audit --offline --omit=dev --audit-level=moderate`：本地缓存审计为 0 vulnerabilities（联网审计需在可访问 registry 的环境复核）。
+- [x] `npm test`：默认并行 runner 已通过全部自动化回归（含 CIDR ACL、代理连接限流、令牌桶、配置指纹和请求体超时）。
 - [x] 已修复 `test/config-launcher.test.js` 的固定 PID `1234` 冲突：测试注入 `processInspector`，没有放宽生产身份校验。
 
 ### 功能验收
@@ -175,9 +177,9 @@ Herdr Unix socket
 - [ ] 真机验收：手机 VPN 开启且启用 LAN bypass 时行为相同；未启用时显示明确的路由/VPN 提示。
 - [ ] 真机/代理验收：Basic Auth（如启用）和 Bridge token 均能拒绝错误凭据；凭据不出现在 URL、二维码、日志或推送内容中。
 - [x] 自动化覆盖：Bridge/代理重启后可通过 generation、replay gap 和完整 `/api/state` resync 恢复；仍需在真实手机观察 stale 提示。
-- [ ] 真机/视觉验收：320px、375px、390px、桌面宽屏及 200% 字体缩放下无水平滚动，主要控件满足 44px 触控目标。
-- [ ] 键盘、读屏和错误状态的实际辅助技术验收；代码已提供 ARIA、摘要播报和中文错误反馈。
-- [ ] 真机验收：service worker 更新后不会继续显示旧界面，PWA 图标在主流手机浏览器可用。
+- [ ] 真机/视觉验收：320px、375px、390px、桌面宽屏及 200% 字体缩放下无水平滚动，主要控件满足 44px 触控目标（BrowserOS 设备仿真已完成初筛，仍需真实手机）。
+- [ ] 键盘、读屏和错误状态的实际辅助技术验收；代码和 DOM/ARIA 初筛已完成，仍需实际读屏器。
+- [ ] 真机验收：service worker 更新后不会继续显示旧界面，PWA 图标在主流手机浏览器可用（资源/注册已在 BrowserOS 初筛）。
 - [x] 自动化验收：推送服务域名 allowlist、私网/元数据地址拒绝、relay 显式开关、超时和直接发送边界复核均已覆盖。
 
 ### 建议测试矩阵
@@ -223,6 +225,9 @@ node src/launcher.js stop
 - [ ] 在主机防火墙放行 `18787/tcp` 仅给家庭/个人 LAN 网段（需按操作系统实际配置并验证）。
 - [ ] 若 `cookieSecure` 为 `true`，LAN HTTP 登录会失败；HTTP-only LAN 路径应保持未设置或设为 `false`。
 - [ ] 若显式设置 `allowedOrigin`，必须包含精确的 LAN origin（例如 `http://192.168.1.20`），否则应移除该覆盖值以使用同源访问。
+
+真机、辅助技术和防火墙验收可按 [`docs/lan-acceptance-checklist.md`](../docs/lan-acceptance-checklist.md)
+逐项记录；这些项目不能由本地自动化测试代替。
 
 ## 7. 完成定义与优先级
 
