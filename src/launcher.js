@@ -843,11 +843,15 @@ export function statusBridge(options = {}) {
   const runtimePath = config.runtimePath || join(config.stateDir, 'runtime.json');
   const runtime = readJson(runtimePath);
   const running = processMatchesRuntime(runtime, options);
+  const runtimePid = Number(runtime?.pid);
+  const runtimeStale = Boolean(runtime && !running && Number.isFinite(runtimePid) && runtimePid > 0);
   const restartRequired = Boolean(running && runtime.config_fingerprint !== resolvedFingerprint(config));
   return {
     ok: true,
     running,
     pid: running ? Number(runtime.pid) : null,
+    runtime_stale: runtimeStale,
+    stale_pid: runtimeStale ? runtimePid : null,
     host: config.host,
     port: runtime.port ?? config.port,
     url: httpUrl(config.host, runtime.port ?? config.port),

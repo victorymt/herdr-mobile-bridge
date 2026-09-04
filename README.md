@@ -44,6 +44,26 @@ When Herdr starts, the plugin's startup hook idempotently starts the local
 gateway. The hook exits quickly; the gateway is a separate process managed by
 `src/launcher.js`.
 
+## Quick configuration (recommended)
+
+If you do not want to edit `bridge.json` by hand, run the interactive wizard:
+
+```bash
+npm run configure
+```
+
+The Chinese-language wizard asks for the access mode, ports, LAN interface, and
+optional security settings. It detects local interfaces, writes the result
+atomically, and keeps the previous `bridge.json` as `bridge.json.bak` when one
+already exists, so it is safe to run again. The token, bridge secret, and VAPID
+private key are still generated and stored separately rather than written into
+the configuration file. When run from a normal shell, it automatically targets
+the registered Herdr plugin directory; pass `--config-dir` and `--state-dir` if
+you intentionally want a standalone instance. At the end it prints the
+computer/LAN URL and token, shows the exact directories used, waits for the
+Bridge to become ready, and reports the startup error instead of claiming
+success when a port or proxy is unavailable.
+
 ## First setup
 
 The first setup creates a high-entropy browser token, a private event-bridge
@@ -51,10 +71,12 @@ secret, and VAPID keys in Herdr's plugin config directory. Print the setup
 details explicitly (the token is never written to plugin logs):
 
 ```bash
-node src/launcher.js setup
-node src/launcher.js token
-node src/launcher.js ensure
-node src/launcher.js status
+PLUGIN_CONFIG_DIR="$(herdr plugin config-dir herdr.mobile-bridge)"
+PLUGIN_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr.mobile-bridge"
+node src/launcher.js setup --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
+node src/launcher.js token --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
+node src/launcher.js ensure --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
+node src/launcher.js status --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
 ```
 
 `setup` only creates or confirms the configuration and credentials; `ensure`
@@ -62,8 +84,9 @@ starts the Bridge. On the computer, open the `url` printed by `status`, which
 defaults to `http://127.0.0.1:8787`. The service is ready only when `status`
 reports `running:true`: `started:true` from `ensure` means that a detached
 child was spawned, not that its listener is ready. If `running:false` appears,
-do not enter the token in the browser yet; check for a port conflict or inspect
-the runtime/plugin log, then poll `status` again.
+check `startup-error.log` in the state directory for the last failure before
+retrying. A `runtime_stale:true` result means the marker belongs to an exited
+process and can be ignored after resolving the reported error.
 
 Open `http://127.0.0.1:8787` in the computer's browser and enter the printed
 token. This loopback address works only on the computer running Bridge; a
@@ -331,7 +354,9 @@ with `herdr plugin link <path> --disabled` in a disposable Herdr environment.
 ## Configuration files
 
 Runtime configuration belongs under `HERDR_PLUGIN_CONFIG_DIR`; PID/lock data
-and browser subscriptions belong under `HERDR_PLUGIN_STATE_DIR`. These
+and browser subscriptions belong under `HERDR_PLUGIN_STATE_DIR`. A failed
+detached startup is recorded as `startup-error.log` in the state directory and
+removed after a successful start. These
 directories are created by the plugin/Herdr environment and kept outside the
 managed plugin checkout. Treat the
 token, bridge secret, and VAPID private key as credentials. You may provide a

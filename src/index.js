@@ -1,7 +1,8 @@
 import { fileURLToPath } from 'node:url';
-import { basename, dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 
-import { loadConfig } from './config.js';
+import { loadConfig, resolvePaths } from './config.js';
 import { HerdrSocketClient } from './herdr-client.js';
 import { BridgeServer } from './server.js';
 import { LanProxy } from './lan-proxy.js';
@@ -10,6 +11,35 @@ import { TokenBucketLimiter } from './rate-limit.js';
 function authorityHost(host) {
   const value = String(host ?? '').trim();
   return value.includes(':') && !value.startsWith('[') ? `[${value}]` : value;
+}
+
+function startupErrorPath(options = {}) {
+  try {
+    return join(resolvePaths(process.env, options).stateDir, 'startup-error.log');
+  } catch {
+    return undefined;
+  }
+}
+
+function recordStartupError(error, options = {}) {
+  const path = startupErrorPath(options);
+  if (!path) return;
+  const detail = String(error?.message || error || 'unknown startup error')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .slice(0, 1_000);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, `${new Date().toISOString()} ${detail}\n`, { mode: 0o600 });
+    try { chmodSync(path, 0o600); } catch { /* best effort */ }
+  } catch {
+    // Startup diagnostics must never mask the original error.
+  }
+}
+
+function clearStartupError(options = {}) {
+  const path = startupErrorPath(options);
+  if (!path) return;
+  try { rmSync(path, { force: true }); } catch { /* best effort */ }
 }
 
 export { BridgeServer } from './server.js';
@@ -338,19 +368,25 @@ export async function main(argv = process.argv.slice(2)) {
     process.stdout.write('Usage: node src/index.js [--host HOST] [--port PORT] [--lan-host HOST] [--lan-port PORT] [--lan-allow-cidr CIDR] [--rate-limit-per-minute N] [--rate-limit-burst N] [--rate-limit-max-entries N] [--request-body-timeout-ms N] [--socket PATH] [--config-dir DIR] [--state-dir DIR]\n');
     return null;
   }
-  const server = await startBridge(cli);
-  const address = server.address();
-  process.stdout.write(`herdr-mobile-bridge listening on http://${authorityHost(address.host)}:${address.port}\n`);
-  if (cli.printToken) process.stdout.write(`bridge token: ${server.config.token}\n`);
-  let stopping = false;
-  const stop = async () => {
-    if (stopping) return;
-    stopping = true;
-    await server.close();
-  };
-  process.once('SIGINT', () => { void stop().finally(() => process.exit(0)); });
-  process.once('SIGTERM', () => { void stop().finally(() => process.exit(0)); });
-  return server;
+  try {
+    const server = await startBridge(cli);
+    clearStartupError(cli);
+    const address = server.address();
+    process.stdout.write(`herdr-mobile-bridge listening on http://${authorityHost(address.host)}:${address.port}\n`);
+    if (cli.printToken) process.stdout.write(`bridge token: ${server.config.token}\n`);
+    let stopping = false;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      await server.close();
+    };
+    process.once('SIGINT', () => { void stop().finally(() => process.exit(0)); });
+    process.once('SIGTERM', () => { void stop().finally(() => process.exit(0)); });
+    return server;
+  } catch (error) {
+    recordStartupError(error, cli);
+    throw error;
+  }
 }
 
 const entry = fileURLToPath(import.meta.url);

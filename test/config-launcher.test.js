@@ -267,6 +267,30 @@ test('stop/status share launcher config injection validation', async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test('status distinguishes an exited process from a missing runtime marker', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-launcher-stale-status-'));
+  const config = loadConfigSync({
+    configDir: join(root, 'config'),
+    stateDir: join(root, 'state'),
+    token: 't',
+    secret: 's',
+    persistGenerated: false,
+  });
+  await writeFile(config.runtimePath, JSON.stringify({ pid: 9876, port: config.port }));
+  const deadProcess = {
+    kill() {
+      const error = new Error('dead');
+      error.code = 'ESRCH';
+      throw error;
+    },
+  };
+  const status = statusBridge({ config, processApi: deadProcess });
+  assert.equal(status.running, false);
+  assert.equal(status.runtime_stale, true);
+  assert.equal(status.stale_pid, 9876);
+  await rm(root, { recursive: true, force: true });
+});
+
 test('parsePort ignores blank strings but rejects boolean/object coercion', () => {
   assert.equal(parsePort('  \t', 4321), 4321);
   assert.equal(parsePort('0', 4321), 0);

@@ -37,23 +37,40 @@ herdr plugin list --plugin herdr.mobile-bridge
 Herdr 启动时，插件的启动钩子会幂等地启动本地网关。钩子会很快退出，网关则由
 `src/launcher.js` 作为独立进程管理。
 
+## 快速配置（推荐）
+
+不熟悉 `bridge.json` 时，直接运行交互式向导：
+
+```bash
+npm run configure
+```
+
+向导会用中文逐步询问访问方式、端口、LAN 网卡和可选的安全设置，自动探测可用网卡，
+并把结果安全地写入插件配置目录。已有 `bridge.json` 会先备份为 `bridge.json.bak`，
+因此可以重复运行向导；token、桥接密钥和 VAPID 私钥仍由程序单独生成，不会写进这个配置文件。
+即使从普通 shell 运行，向导也会自动定位已注册的 Herdr 插件目录；如果要故意使用独立实例，
+可传入 `--config-dir` 和 `--state-dir` 覆盖目录。向导结束时会显示电脑/LAN 地址、token 以及
+实际使用的目录，等待 Bridge 真正就绪；端口冲突或 LAN proxy 失败时会报告错误，不会误报成功。
+
 ## 首次设置
 
 首次设置会在 Herdr 的插件配置目录中生成高熵浏览器令牌、私有事件桥接密钥和 VAPID 密钥。
 如需明确打印设置详情，请执行以下命令（令牌不会写入插件日志）：
 
 ```bash
-node src/launcher.js setup
-node src/launcher.js token
-node src/launcher.js ensure
-node src/launcher.js status
+PLUGIN_CONFIG_DIR="$(herdr plugin config-dir herdr.mobile-bridge)"
+PLUGIN_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/herdr/plugins/herdr.mobile-bridge"
+node src/launcher.js setup --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
+node src/launcher.js token --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
+node src/launcher.js ensure --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
+node src/launcher.js status --config-dir "$PLUGIN_CONFIG_DIR" --state-dir "$PLUGIN_STATE_DIR"
 ```
 
 `setup` 只负责生成或确认配置和令牌；`ensure` 才会启动 Bridge。浏览器在电脑上访问
 `status` 输出的 `url`，默认是 `http://127.0.0.1:8787`。只有当 `status` 显示
 `running:true` 时服务才真正就绪；`ensure` 输出的 `started:true` 仅表示已创建后台子进程，
-不代表监听器已经启动。若看到 `running:false`，先不要在浏览器输入令牌，应检查端口冲突或
-运行日志，并重复执行 `status`。
+不代表监听器已经启动。若看到 `running:false`，先查看状态目录中的 `startup-error.log` 再重试。
+如果出现 `runtime_stale:true`，表示 runtime 标记属于已退出的进程，解决错误后可以忽略它。
 
 在电脑浏览器中打开 `http://127.0.0.1:8787`，在登录表单中输入打印出的令牌。这个地址只能
 在运行 Bridge 的电脑上使用；手机不能用电脑的 `127.0.0.1`。登录后，可以从通知控件申请
@@ -273,7 +290,8 @@ npm run check
 ## 配置文件
 
 运行时配置放在 `HERDR_PLUGIN_CONFIG_DIR` 下；PID/锁数据和浏览器订阅放在
-`HERDR_PLUGIN_STATE_DIR` 下。这两个目录由插件/Herdr 环境创建，并且位于受管理的插件检出目录之外。
+`HERDR_PLUGIN_STATE_DIR` 下。后台启动失败时，错误会记录到状态目录的 `startup-error.log`，
+成功启动后自动清理。这两个目录由插件/Herdr 环境创建，并且位于受管理的插件检出目录之外。
 请把令牌、桥接密钥和 VAPID 私钥视为凭据。你可以在 `vapid.json` 中提供一对 VAPID 密钥
 （字段名为 `publicKey`/`privateKey`），也可以让网关在首次启动时自动生成。如果通过
 `HERDR_BRIDGE_VAPID_PUBLIC_KEY` 和 `HERDR_BRIDGE_VAPID_PRIVATE_KEY` 配置密钥，必须同时
