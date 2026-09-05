@@ -79,7 +79,7 @@ Herdr Unix socket
 - [x] 增加“复制地址”和“局域网连接测试”按钮，测试结果区分成功、超时、拒绝和 VPN 拦截。
 - [x] 在向导中提供 VPN/LAN bypass 的逐项提示和重新测试入口。
 - [x] 登录后保留 token/session 的安全提示；二维码不携带长期凭据。
-- [ ] （可选）增加短时一次性配对码，进一步减少手动粘贴 token 的需要。
+- [x] 增加短时一次性配对码，进一步减少手动粘贴 token 的需要；使用 `node src/launcher.js pair` 生成。
 - [x] 对 `401/403/404/429` 和网络断开提供面向用户的中文错误说明及下一步操作。
 
 ### 阶段 3：后端安全、生命周期与实时性
@@ -151,7 +151,7 @@ Herdr Unix socket
 | `src/launcher.js` | LAN proxy 生命周期、健康检查、PID 身份和运行标记 |
 | `src/lan-proxy.js`（已实现） | 用 Node 实现跨平台 LAN 转发，作为默认入口；外部 socat/Caddy 为可选替代 |
 | `src/server.js` | DTO allowlist、healthz、session/IP 限流、请求体超时、SSE 背压 |
-| `src/auth.js` | query token 限制、session/CSRF；一次性配对码为可选后续项 |
+| `src/auth.js` | query token 限制、session/CSRF、一次性配对码 |
 | `src/event-hook.js` | 启动竞态重试、错误和日志脱敏 |
 | `src/event-bus.js` | replay gap、`resync_required` 和重启代次 |
 | `public/index.html` | 连接向导、二维码、无障碍结构 |

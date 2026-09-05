@@ -227,9 +227,25 @@ run `node src/launcher.js stop` and then `ensure`.
 
 Open the URL for the path you chose—your HTTPS proxy URL for notifications, or
 the LAN URL for controls only—not `http://127.0.0.1:8787`. On the first visit,
-enter the token printed by `node src/launcher.js token`. The dashboard then
-keeps an authenticated browser session and can request push permission from
-the **Enable notifications** button when the origin is HTTPS.
+enter the one-time code printed by `node src/launcher.js pair`. The dashboard
+then keeps an authenticated browser session and can request push permission
+from the **Enable notifications** button when the origin is HTTPS. Token login
+remains available as a fallback.
+
+## Mobile login and pairing
+
+The mobile login screen defaults to a one-time pairing code. From the project directory on the
+computer, run:
+
+```bash
+node src/launcher.js pair
+```
+
+The command requires a running Bridge and uses the local owner token to create an eight-digit code.
+The code is printed only to the terminal, expires after five minutes, and can be used once. It is
+not written to configuration, logs, URLs, or QR codes. The mobile browser exchanges it for the
+same short-lived session used by token login. A token-login fallback remains available in the
+login method selector.
 
 ## Mobile controls
 
@@ -240,8 +256,15 @@ The dashboard is constrained to a single Herdr session:
 - focus a workspace or pane;
 - send a bounded task through Herdr's `agent.prompt` API;
 - send bounded text plus a small allowlist of interactive keys through
-  `pane.send_input` (Enter, Escape, Tab, arrows, Backspace, and selected
+`pane.send_input` (Enter, Escape, Tab, arrows, Backspace, and selected
   control keys).
+
+### Push delivery
+
+Accepted status events are written to a bounded local delivery queue before the Bridge responds.
+Network errors, timeouts, `429`, and `5xx` responses retry with backoff during a five-minute window,
+including after a Bridge restart. Expired subscriptions (`404`/`410`) are removed automatically.
+The notification settings popover shows pending and recent delivery status for the current device.
 
 The output view requests Herdr's `recent_unwrapped` snapshot with
 `format=ansi` and renders common terminal colors and text styles safely in the

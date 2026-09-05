@@ -16,7 +16,7 @@
       <div class="brand-mark" aria-hidden="true"><span>H</span></div>
       <p class="eyebrow">HERDR / MOBILE BRIDGE</p>
       <h1 id="login-title">把会话带到手机上</h1>
-      <p class="login-copy">输入本机桥接令牌，查看智能体状态，并在需要时从手机发送任务或交互输入。</p>
+      <p class="login-copy">输入电脑生成的配对码，查看智能体状态，并在需要时从手机发送任务或交互输入。</p>
       <section class="connection-guide" aria-labelledby="connection-guide-title">
         <div class="connection-guide-heading"><h2 id="connection-guide-title">连接到本机服务</h2><button type="button" class="text-button" id="discovery-refresh">重新检测</button></div>
         <p id="discovery-status" class="discovery-status" role="status" aria-live="polite">正在检测局域网地址…</p>
@@ -25,19 +25,26 @@
         <p id="discovery-hint" class="discovery-hint">二维码不会包含访问令牌。请确认手机与电脑在同一网络。</p>
       </section>
       <form id="login-form" novalidate>
-        <label for="token">访问令牌</label>
-        <div class="token-field"><input id="token" name="token" type="password" autocomplete="current-password" spellcheck="false" required placeholder="粘贴 bridge token"><button type="button" class="reveal-button" id="reveal-token" aria-label="显示令牌">显示</button></div>
+        <label for="login-method">登录方式</label>
+        <select id="login-method"><option value="pair">配对码登录</option><option value="token">使用访问令牌</option></select>
+        <div id="pairing-fields">
+          <label for="pairing-code">一次性配对码</label>
+          <div class="token-field"><input id="pairing-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" pattern="[0-9]{8}" aria-describedby="pairing-help" placeholder="8 位数字" spellcheck="false"></div>
+          <p id="pairing-help" class="discovery-hint">在电脑项目目录运行 <code>node src/launcher.js pair</code>。5 分钟内有效，配对后可控制当前 Herdr 会话。</p>
+        </div>
+        <div id="token-fields" hidden><label for="token">访问令牌</label>
+        <div class="token-field"><input id="token" name="token" type="password" autocomplete="current-password" spellcheck="false" placeholder="粘贴 bridge token"><button type="button" class="reveal-button" id="reveal-token" aria-label="显示令牌">显示</button></div></div>
         <p class="form-error" id="login-error" role="alert" aria-live="polite"></p>
         <button class="primary-button full-width" type="submit" id="login-button"><span>连接 Herdr</span><span class="button-spinner" aria-hidden="true"></span></button>
       </form>
-      <p class="security-note"><span class="lock-icon" aria-hidden="true">⌑</span>令牌只用于换取短期安全会话，不会显示在网址中。</p>
+      <p class="security-note"><span class="lock-icon" aria-hidden="true">⌑</span>配对码不会显示在网址中。HTTP 仅适用于可信局域网；一次性配对不能替代 HTTPS 加密。</p>
     </div>
   </section>
 
   <main class="shell" id="app-shell" hidden>
     <header class="topbar">
       <div class="brand-line"><div class="mini-mark" aria-hidden="true">H</div><div><p class="eyebrow">HERDR / MOBILE BRIDGE</p><h1>移动控制台</h1></div></div>
-      <div class="top-actions"><div class="connection" role="status" aria-live="polite"><span class="dot" id="status-dot"></span><span id="connection-label">连接中</span></div><button class="ghost-button" id="logout-button" type="button">退出</button></div>
+      <div class="top-actions"><div class="connection" role="status" aria-live="polite"><span class="dot" id="status-dot"></span><span id="connection-label">连接中</span></div><div class="notification-menu" id="notification-menu"><button class="icon-button notification-toggle" id="notification-toggle" type="button" aria-label="打开通知设置" aria-expanded="false" aria-controls="push-card" aria-haspopup="dialog"><svg class="notification-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7M10 20h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></button><section class="push-card notification-popover" id="push-card" role="dialog" aria-labelledby="push-heading" hidden><div class="push-copy"><div class="push-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7M10 20h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></div><div><p class="eyebrow">NOTIFICATIONS</p><h3 id="push-heading">任务提醒</h3><p>完成或阻塞时，在手机上收到轻量提醒。</p><p class="push-hint" id="push-hint">需要 HTTPS 和浏览器通知权限；HTTP 局域网仍可正常查看和控制。</p></div></div><button class="primary-button" id="push-button" type="button">开启提醒</button></section></div><button class="ghost-button" id="logout-button" type="button">退出</button></div>
     </header>
 
     <section class="hero-card" aria-labelledby="agent-heading">
@@ -147,7 +154,6 @@
             <button class="quick-action" type="button" data-view="control"><span><strong>控制窗格</strong><small>发送任务或输入</small></span><span aria-hidden="true">↗</span></button>
           </div>
         </section>
-        <section class="push-card" id="push-card"><div class="push-copy"><div class="push-symbol" aria-hidden="true">◌</div><div><p class="eyebrow">NOTIFICATIONS</p><h3>任务提醒</h3><p>完成或阻塞时，在手机上收到轻量提醒。</p><p class="push-hint" id="push-hint">需要 HTTPS 和浏览器通知权限；HTTP 局域网仍可正常查看和控制。</p></div></div><button class="primary-button" id="push-button" type="button">开启提醒</button></section>
       </aside>
     </div>
 

@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual, randomInt, createHash } from 'node:crypto';
 
 const DEFAULT_COOKIE = 'herdr_bridge_session';
 const DEFAULT_CSRF_COOKIE = 'XSRF-TOKEN';
@@ -51,6 +51,8 @@ export class AuthManager {
     this.clock = options.clock || (() => Date.now());
     this.random = options.random || (() => randomBytes(32).toString('base64url'));
     this.sessions = new Map();
+    this.pairing = null;
+    this.pairingGenerations = [];
   }
 
   prune() {
@@ -76,11 +78,55 @@ export class AuthManager {
     // locally readable event-hook environment leak full mobile control.
     const candidate = input.token ?? input.access_token ?? input.password;
     if (!this.verifyOwnerToken(candidate)) return { ok: false, reason: 'invalid_credentials' };
+    return this.createSession();
+  }
+
+  createSession() {
+    this.prune();
     const session = this.random();
     const csrf = this.random();
     const expiresAt = this.clock() + this.ttlMs;
     this.sessions.set(session, { expiresAt, csrf });
     return { ok: true, session, csrf, expiresAt };
+  }
+
+  createPairingCode() {
+    const now = this.clock();
+    this.pairingGenerations = this.pairingGenerations.filter((stamp) => stamp > now - 60_000);
+    if (this.pairingGenerations.length >= 5) return { ok: false, retryAfter: Math.max(1, Math.ceil((this.pairingGenerations[0] + 60_000 - now) / 1000)) };
+    this.pairingGenerations.push(now);
+    let code;
+    do { code = String(randomInt(100_000_000)).padStart(8, '0'); }
+    while (this.pairing && constantTimeEqual(this.pairing.digest, this.pairingDigest(this.pairing.salt, code)));
+    const salt = randomBytes(32).toString('hex');
+    const expiresAt = now + 300_000;
+    this.pairing = { salt, digest: this.pairingDigest(salt, code), expiresAt, attempts: 0 };
+    return { ok: true, code, expiresAt };
+  }
+
+  pairingDigest(salt, code) {
+    return createHash('sha256').update(`${salt}\0${code}`).digest('hex');
+  }
+
+  pair(credentials) {
+    const pending = this.pairing;
+    const code = typeof credentials?.code === 'string' ? credentials.code.trim() : '';
+    if (!pending || pending.expiresAt <= this.clock()) {
+      this.resetPairing();
+      return { ok: false };
+    }
+    if (!/^\d{8}$/.test(code) || !constantTimeEqual(pending.digest, this.pairingDigest(pending.salt, code))) {
+      pending.attempts += 1;
+      if (pending.attempts >= 5) this.resetPairing();
+      return { ok: false };
+    }
+    const session = this.createSession();
+    this.resetPairing();
+    return session;
+  }
+
+  resetPairing() {
+    this.pairing = null;
   }
 
   logout(requestOrSession) {

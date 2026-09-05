@@ -1,6 +1,6 @@
 # Herdr Mobile Bridge 实现进度
 
-最后更新：2026-09-04
+最后更新：2026-09-05
 
 本文档用于下次继续开发时快速恢复上下文。当前改动尚未提交为 Git commit；请保留工作区中已有的用户修改，尤其是 `public/icon.svg`。
 
@@ -33,23 +33,27 @@
 - README、README.zh-CN.md、socat 连接文档及 TODO 清单已同步更新；两份 README 均说明
   LAN CLI 参数的非持久性、`status` 的 loopback URL 与 detached 启动状态。
 - 已提供可选的 Caddy LAN HTTPS 示例和独立的真机/辅助技术验收清单。
+- 推送可靠性已补齐：已接收事件先写入有界持久化队列，网络/超时/429/5xx 按退避重试，重启后恢复；
+  404/410 会移除失效订阅，状态变化会取消未发送的旧提醒，并提供受保护的 `/api/push/status`。
+- 一次性配对码已补齐：`node src/launcher.js pair` 在本机生成 8 位、5 分钟有效、最多使用一次的数字码；
+  手机登录页默认使用配对码，访问令牌登录仍可回退。
 
 ## 验证结果
 
 最近一次验证结果：
 
 ```text
-npm test                         134/134 通过
+npm test                         163/163 通过
 npm run check                    通过
 git diff --check                 通过
 npm audit --offline --omit=dev --audit-level=moderate  0 vulnerabilities
 ```
 
-代码知识图谱已在最终源码状态重新索引（521 nodes / 1368 edges）。
+代码知识图谱已在本轮源码状态重新索引（977 nodes / 2746 edges）。
 
 另已做过父进程/ detached child 模拟，确认默认配置、空值回退、旧配置隔离、VAPID/凭据传播，以及自定义相对 `runtime/lock/subscriptions/dedup` 路径和显式环境别名的指纹、路径一致；直接 `BridgeServer` 构造边界、直接/单次 socket 覆盖值和订阅元数据边界也有回归覆盖。
 
-最新针对 launcher 注入配置显式空 listener 值的回归测试为 `36/36` 通过；随后全量测试为 `128/128`。
+本轮新增推送可靠性和配对回归测试；当前全量测试为 `163/163` 通过。
 
 BrowserOS 本地浏览器初筛也已完成：在 320、375、390 CSS px 以及 200% 根字号下，向导没有水平
 溢出；可见按钮、链接和输入框的高度均为 44px；可见图片没有缺失 `alt`；标题层级存在；
@@ -61,7 +65,7 @@ BrowserOS 本地浏览器初筛也已完成：在 320、375、390 CSS px 以及 
 以下项目不适合仅靠本地单元测试完成，仍需真实主机、手机或浏览器环境：
 
 - 手机 VPN 关闭/开启时的真实 LAN 连接验证。
-- 可选的一次性配对码流程。
+- 一次性配对码在真实 LAN 上的 CLI 生成、手机输入和过期提示体验。
 - 同 Wi‑Fi、VPN 绕行、Basic Auth/token 代理等真实设备访问验证。
 - 真实手机上的 320/375/390/桌面/200% 缩放视觉检查（BrowserOS 仿真已通过初筛）。
 - 键盘操作与屏幕阅读器可访问性检查（DOM/ARIA 初筛已完成，仍需实际辅助技术）。

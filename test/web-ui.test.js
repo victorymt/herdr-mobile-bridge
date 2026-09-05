@@ -16,6 +16,8 @@ test('responsive console keeps discovery controls and selectors at touch size', 
   assert.match(html, /id="mobile-attention"/);
   assert.match(html, /id="live-label"/);
   assert.match(html, /role="tablist"/);
+  assert.match(html, /id="notification-toggle"[^>]+aria-expanded="false"[^>]+aria-controls="push-card"/);
+  assert.match(html, /class="push-card notification-popover" id="push-card"[^>]+hidden/);
   assert.match(html, /data-max-bytes="32768"/);
   assert.match(html, /data-max-bytes="8192"/);
   assert.match(app, /class="discovery-link"/);
@@ -25,6 +27,11 @@ test('responsive console keeps discovery controls and selectors at touch size', 
   assert.match(css, /select, \.token-field input \{ min-height: 44px; \}/);
   assert.match(css, /\.tabs \{ display: none; \}/);
   assert.match(css, /\.main-column > \.view \{ padding-bottom:/);
+  assert.match(css, /\.notification-menu \{ position: relative;/);
+  assert.match(css, /\.notification-popover \{/);
+  assert.match(app, /notificationOpen: false/);
+  assert.match(app, /function setNotificationOpen\(open/);
+  assert.match(app, /event\.key !== 'Escape' \|\| !model\.notificationOpen/);
 });
 
 test('offline cache and attention controls cannot become stale write surfaces', async () => {

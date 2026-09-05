@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
+import { makePushPayload } from './push.js';
+import { sanitizePaneStatus } from './state-store.js';
+import { pruneDeliveries } from './push-worker.js';
 
 export const STATUS_EVENTS = new Set(['pane_agent_status_changed', 'pane.agent_status_changed']);
 export const DETECTED_EVENTS = new Set(['pane_agent_detected', 'pane.agent_detected']);
@@ -217,6 +220,7 @@ export class EventBus {
     }
     const context = canonicalContext(payload, eventName);
     const dedupKey = eventFingerprint(payload, eventName, context);
+    if (this.store?.transactEvents) return this.processDurable(payload, eventName, context, dedupKey);
     if (this.store && !(await this.store.markSeen(dedupKey))) {
       return { accepted: true, duplicate: true, dedup_key: dedupKey, event: eventName };
     }
@@ -292,6 +296,66 @@ export class EventBus {
       }
     }
     return { accepted: true, duplicate: false, dedup_key: dedupKey, event: eventName, envelope, push };
+  }
+
+  async processDurable(payload, eventName, context, dedupKey) {
+    const now = this.clock();
+    const socketPath = payload.socket_path || payload.socketPath || this.socketPath;
+    const envelope = { id: payload.event_id || payload.eventId || randomUUID(), event: eventName, context, socket_path: socketPath, received_at: new Date(now).toISOString() };
+    const result = await this.store.transactEvents((next, subscriptions) => {
+      if (next.dedup[dedupKey] >= now - this.store.dedupTtlMs) return { duplicate: true, push: null };
+      pruneDeliveries(next, subscriptions, now);
+      const paneId = context.pane_id;
+      const statusEvent = Boolean(paneId && (STATUS_EVENTS.has(eventName) || DETECTED_EVENTS.has(eventName)));
+      const previous = Object.hasOwn(next.pane_statuses, paneId) ? next.pane_statuses[paneId] : {};
+      const statusField = eventName === 'pane_agent_detected' ? 'final_status' : 'agent_status';
+      const status = context[statusField];
+      const agent = context.agent || context.display_agent || previous.agent || previous.display_agent || '';
+      const released = context.released === true;
+      const closed = Boolean(paneId && ['pane_closed', 'pane_exited'].includes(eventName));
+      const identityChanged = Boolean(paneId && (context.agent || context.display_agent)
+        && agent !== (previous.agent || previous.display_agent || ''));
+      const changed = closed || identityChanged || (statusEvent && (released || (status !== undefined && status !== previous[statusField])));
+      if (changed) {
+        next.deliveries = next.deliveries.filter((task) => {
+          if (task.pane_id !== paneId) return true;
+          Object.defineProperty(next.summaries, task.subscription_id, { value: { ...(Object.hasOwn(next.summaries, task.subscription_id) ? next.summaries[task.subscription_id] : {}), last_result: 'cancelled', updated_at: now }, enumerable: true, writable: true, configurable: true });
+          return false;
+        });
+      }
+      const shouldNotify = statusEvent && !released && TERMINAL_STATUSES.has(status)
+        && (status !== previous[statusField] || previous.last_notified_agent !== agent);
+      if (statusEvent || closed || identityChanged) {
+        const merged = { ...previous, ...context, updated_at: envelope.received_at };
+        if (identityChanged) {
+          delete merged.last_notified_status;
+          delete merged.last_notified_agent;
+        }
+        if (released && status === undefined) delete merged[statusField];
+        if (closed) { delete merged.agent_status; delete merged.final_status; }
+        if (shouldNotify) { merged.last_notified_status = status; merged.last_notified_agent = agent; }
+        Object.defineProperty(next.pane_statuses, paneId, { value: sanitizePaneStatus(paneId, merged), enumerable: true, writable: true, configurable: true });
+      }
+      let push = null;
+      if (shouldNotify && this.pushManager) {
+        if (next.deliveries.length + subscriptions.length > 1000) throw Object.assign(new Error('push queue is full'), { status: 503, code: 'push_queue_full' });
+        const notification = makePushPayload(envelope);
+        for (const subscription of subscriptions) {
+          next.deliveries.push({ id: createHash('sha256').update(`${dedupKey}\0${subscription.id}`).digest('hex'), subscription_id: subscription.id, pane_id: paneId, payload: notification, expires_at: now + 300_000, next_attempt_at: now, attempts: 0 });
+        }
+        push = { queued: subscriptions.length };
+      }
+      next.dedup[dedupKey] = now;
+      return { duplicate: false, push };
+    });
+    if (!result.duplicate) {
+      if (socketPath && typeof this.onSocketPath === 'function') {
+        try { this.onSocketPath(socketPath); } catch { this.logger.warn?.('ignoring invalid event socket path'); }
+      }
+      this.publish(envelope);
+      this.pushManager?.worker?.wake();
+    }
+    return { accepted: true, ...result, dedup_key: dedupKey, event: eventName, ...(!result.duplicate ? { envelope } : {}) };
   }
 }
 

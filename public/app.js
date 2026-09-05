@@ -20,6 +20,11 @@ const model = {
   focusBusy: false,
   activeView: 'overview',
   attention: null,
+  notificationOpen: false,
+  pushStatusTimer: null,
+  pushStatusRequest: 0,
+  pushSubscriptionId: '',
+  pushSubscriptionEndpoint: '',
   deepLink: null,
   outputError: '',
   outputLoading: false,
@@ -266,7 +271,9 @@ function statusErrorMessage(error, fallback = '请求失败，请稍后重试。
 function updatePushAvailability() {
   const button = $('push-button');
   if (!button) return;
+  const toggle = $('notification-toggle');
   const hint = $('push-hint');
+  toggle?.classList.toggle('is-enabled', button.dataset.enabled === 'true');
   const secure = window.isSecureContext !== false;
   const supported = secure && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   if (!secure) {
@@ -292,6 +299,62 @@ function updatePushAvailability() {
   if (hint) hint.textContent = '需要 HTTPS 和浏览器通知权限；HTTP 局域网仍可正常查看和控制。';
 }
 
+function setNotificationOpen(open, { returnFocus = false } = {}) {
+  const toggle = $('notification-toggle');
+  const panel = $('push-card');
+  if (!toggle || !panel) return;
+  model.notificationOpen = Boolean(open);
+  panel.hidden = !model.notificationOpen;
+  toggle.setAttribute('aria-expanded', String(model.notificationOpen));
+  toggle.setAttribute('aria-label', model.notificationOpen ? '关闭通知设置' : '打开通知设置');
+  if (returnFocus) toggle.focus();
+  restartPushStatus();
+}
+
+function restartPushStatus() {
+  clearTimeout(model.pushStatusTimer);
+  model.pushStatusRequest += 1;
+  if (model.notificationOpen && model.authenticated && navigator.onLine !== false && document.visibilityState !== 'hidden') void refreshPushStatus(model.pushStatusRequest);
+}
+
+async function refreshPushStatus(request) {
+  let node = $('push-delivery-status');
+  if (!node) {
+    node = document.createElement('p');
+    node.id = 'push-delivery-status';
+    node.className = 'push-hint';
+    node.setAttribute('role', 'status');
+    $('push-card').append(node);
+  }
+  if (request !== model.pushStatusRequest) return;
+  let message = '未开启提醒，或需要重新确认本设备订阅。';
+  try {
+    const registration = await navigator.serviceWorker?.getRegistration();
+    const subscription = await registration?.pushManager?.getSubscription();
+    if (subscription) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(subscription.endpoint));
+      if (request !== model.pushStatusRequest) return;
+      const derivedId = `sub_${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('').slice(0, 24)}`;
+      const subscriptionId = model.pushSubscriptionEndpoint === subscription.endpoint && model.pushSubscriptionId ? model.pushSubscriptionId : derivedId;
+      model.pushSubscriptionId = subscriptionId;
+      model.pushSubscriptionEndpoint = subscription.endpoint;
+      const status = await api(`/api/push/status?subscription_id=${encodeURIComponent(subscriptionId)}`, { signal: AbortSignal.timeout(5000) });
+      if (request !== model.pushStatusRequest) return;
+      $('push-button').dataset.enabled = String(status.registered);
+      updatePushAvailability();
+      const results = { accepted: '已提交推送服务', retrying: '正在等待重试', failed: '投递失败', expired: '通知已过期', cancelled: '旧通知已取消' };
+      message = `待处理 ${status.pending} · 待重试 ${status.retrying}`;
+      if (status.last_result) message += `。${results[status.last_result] || '状态已更新'}`;
+      if (status.last_success_at) message += `；最近提交成功 ${new Date(status.last_success_at).toLocaleTimeString()}`;
+      if (status.last_error) message += `（${status.last_error === 'network_or_timeout' ? '网络故障或超时' : status.last_error === 'subscription_expired' ? '订阅已失效' : status.last_error}）`;
+      if (!status.registered) message += '。本设备订阅未注册或已失效，请重新开启提醒。';
+    }
+  } catch { message = '暂时无法读取投递状态，请稍后重试。'; }
+  if (request !== model.pushStatusRequest) return;
+  node.textContent = message;
+  model.pushStatusTimer = setTimeout(() => void refreshPushStatus(request), 5000);
+}
+
 function showToast(message, duration = 3200) {
   const node = $('toast');
   node.textContent = message;
@@ -302,6 +365,12 @@ function showToast(message, duration = 3200) {
 
 function setAuthenticated(value) {
   model.authenticated = value;
+  if (!value) {
+    model.pushSubscriptionId = '';
+    model.pushSubscriptionEndpoint = '';
+    $('push-button').dataset.enabled = 'false';
+    setNotificationOpen(false);
+  }
   $('login-screen').hidden = value;
   $('app-shell').hidden = !value;
   $('app-shell')?.setAttribute('aria-busy', value && !model.connected ? 'true' : 'false');
@@ -836,15 +905,18 @@ function handleStreamEvent(event) {
 
 async function login(event) {
   event.preventDefault();
+  const pairing = $('login-method').value === 'pair';
+  const code = $('pairing-code').value.trim();
   const token = $('token').value.trim();
-  if (!token) { $('login-error').textContent = '请输入访问令牌'; return; }
+  if (pairing ? !/^\d{8}$/.test(code) : !token) { $('login-error').textContent = pairing ? '请输入 8 位数字配对码' : '请输入访问令牌'; return; }
   const button = $('login-button');
   button.disabled = true;
   button.classList.add('is-loading');
   $('login-error').textContent = '';
   try {
-    await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ token }), headers: { 'Content-Type': 'application/json' } });
+    await api(pairing ? '/api/auth/pair' : '/api/auth/login', { method: 'POST', body: JSON.stringify(pairing ? { code } : { token }), headers: { 'Content-Type': 'application/json' } });
     $('token').value = '';
+    $('pairing-code').value = '';
     setSessionMarker(true);
     setAuthenticated(true);
     await refreshState({ quiet: true });
@@ -861,7 +933,7 @@ async function login(event) {
     closeStream();
     setSessionMarker(false);
     setAuthenticated(false);
-    $('login-error').textContent = error.status === 429 ? '尝试次数过多，请稍后再试' : (error.status === 403 ? '来源未被允许，请使用配置的 HTTPS 地址' : statusErrorMessage(error, '令牌无效或服务不可用'));
+    $('login-error').textContent = error.status === 429 ? '尝试次数过多，请稍后再试' : (error.status === 403 ? '来源未被允许，请使用配置的 HTTPS 地址' : pairing && error.status === 401 ? '配对码无效或已过期，请在电脑重新生成' : statusErrorMessage(error, '凭据无效或服务不可用'));
   } finally {
     button.disabled = false;
     button.classList.remove('is-loading');
@@ -1333,7 +1405,10 @@ async function enablePush() {
     const registration = await navigator.serviceWorker.ready;
     const existing = await registration.pushManager.getSubscription();
     const subscription = existing || await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(keyData.publicKey) });
-    await api('/api/push/subscriptions', { method: 'POST', body: JSON.stringify(subscription) });
+    const registered = await api('/api/push/subscriptions', { method: 'POST', body: JSON.stringify(subscription) });
+    model.pushSubscriptionId = registered.subscription?.id || '';
+    model.pushSubscriptionEndpoint = subscription.endpoint;
+    restartPushStatus();
     button.dataset.enabled = 'true';
     button.textContent = '提醒已开启';
     updatePushAvailability();
@@ -1496,17 +1571,21 @@ function setupOutputScrolling() {
 
 function setupConnectivityListeners() {
   window.addEventListener('online', () => {
+    restartPushStatus();
     if (!model.authenticated) return;
     setConnection(false, '网络已恢复，正在同步最新状态…');
     scheduleStateRefresh(0);
     connectStream();
   });
   window.addEventListener('offline', () => {
+    restartPushStatus();
+    if ($('push-delivery-status')) $('push-delivery-status').textContent = '当前设备离线，恢复网络后更新投递状态。';
     if (!model.authenticated) return;
     setConnection(false, '当前设备离线，显示最近一次状态；恢复网络后将自动同步。');
     closeStream();
   });
   document.addEventListener('visibilitychange', () => {
+    restartPushStatus();
     if (document.visibilityState !== 'visible' || !model.authenticated) return;
     scheduleStateRefresh(0);
     if (!model.stream || model.stream.readyState === window.EventSource?.CLOSED) connectStream();
@@ -1610,6 +1689,24 @@ $('clear-output').addEventListener('click', () => {
   renderOutput();
   renderAttention();
   announce('输出已清空');
+});
+$('notification-toggle').addEventListener('click', () => setNotificationOpen(!model.notificationOpen));
+$('login-method').addEventListener('change', () => {
+  const pairing = $('login-method').value === 'pair';
+  $('pairing-fields').hidden = !pairing;
+  $('token-fields').hidden = pairing;
+  $('pairing-code').value = '';
+  $('token').value = '';
+  $('login-error').textContent = '';
+  (pairing ? $('pairing-code') : $('token')).focus();
+});
+document.addEventListener('click', (event) => {
+  if (!model.notificationOpen || event.target?.closest?.('#notification-menu')) return;
+  setNotificationOpen(false);
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !model.notificationOpen) return;
+  setNotificationOpen(false, { returnFocus: true });
 });
 $('push-button').addEventListener('click', enablePush);
 $('focus-list').addEventListener('click', (event) => { const id = event.target.closest('[data-focus-pane]')?.dataset.focusPane; if (id) void focusPane(id); });

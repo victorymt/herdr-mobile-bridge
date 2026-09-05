@@ -46,7 +46,7 @@ test('pane status fields can be explicitly cleared without losing unrelated meta
   assert.equal(cleared.state_labels, undefined);
   assert.equal(cleared.title, 'new task');
   assert.equal((await stat(root)).mode & 0o777, 0o700);
-  const persisted = JSON.parse(await readFile(join(root, 'runtime.json'), 'utf8'));
+  const persisted = JSON.parse(await readFile(join(root, 'dedup.json'), 'utf8'));
   assert.equal(persisted.pane_statuses['pane-1'].final_status, undefined);
   await rm(root, { recursive: true, force: true });
 });

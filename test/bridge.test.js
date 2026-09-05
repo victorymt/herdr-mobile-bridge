@@ -396,7 +396,7 @@ test('internal events require the hook secret, persist statuses and push only te
     body: JSON.stringify(doneBody),
   });
   assert.equal(done.status, 202);
-  assert.equal((await done.json()).push.delivered, 0);
+  assert.equal((await done.json()).push.queued, 0);
   assert.equal(pushes.length, 0, 'without a subscription no sender should run');
 
   const add = await request('/api/push/subscriptions', {
@@ -419,6 +419,9 @@ test('internal events require the hook secret, persist statuses and push only te
     body: JSON.stringify({ event: 'pane_agent_detected', context: { pane_id: 'w1:p1', workspace_id: 'w1', final_status: 'blocked', agent: 'codex' } }),
   });
   assert.equal(detected.status, 202);
+  assert.equal((await detected.json()).push.queued, 1);
+  await server.push.worker.pump();
+  await Promise.all([...server.push.worker.active.values()]);
   assert.equal(pushes.length, 1);
   assert.equal(pushes[0].payload.status, 'blocked');
 });

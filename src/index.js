@@ -54,6 +54,7 @@ export {
 export { AuthManager } from './auth.js';
 export { EventBus, EventInputError, normalizeEventName, normalizeStatus } from './event-bus.js';
 export { PushManager, makePushPayload } from './push.js';
+export { PushWorker, deliveryFailure } from './push-worker.js';
 export { StateStore } from './state-store.js';
 export { LanProxy } from './lan-proxy.js';
 export {

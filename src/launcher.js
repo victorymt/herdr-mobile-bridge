@@ -973,13 +973,38 @@ function parseArgs(argv) {
   return result;
 }
 
+export async function pairBridge(options = {}) {
+  const suppliedConfig = suppliedLauncherConfig(options);
+  const paths = resolvePaths(options.env || process.env, options);
+  if (!suppliedConfig && !existsSync(paths.runtimePath)) throw new Error('Bridge 未运行，请先执行 node src/launcher.js ensure');
+  const config = suppliedConfig ? normalizeInjectedConfig(suppliedConfig, options) : loadConfigSync({ ...options, persistGenerated: false });
+  const status = statusBridge({ ...options, config });
+  if (!status.running) throw new Error('Bridge 未运行，请先执行 node src/launcher.js ensure');
+  if (status.restart_required) throw new Error('Bridge 配置不匹配，请先重启 Bridge');
+  const response = await (options.fetch || globalThis.fetch)(`${status.url}/api/auth/pairing-code`, {
+    method: 'POST',
+    redirect: 'error',
+    headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+    body: '{}',
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) throw new Error(`无法生成配对码 (HTTP ${response.status})`);
+  const result = await response.json();
+  if (!/^\d{8}$/.test(result.code) || !Number.isFinite(Date.parse(result.expires_at))) throw new Error('Bridge 返回无效配对响应');
+  return result;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const parsed = parseArgs(argv);
-  if (parsed.options.help || !['ensure', 'setup', 'status', 'token', 'stop'].includes(parsed.command)) {
-    process.stdout.write('Usage: node src/launcher.js <ensure|setup|status|token|stop> [--host HOST] [--port PORT] [--lan-host HOST --lan-port PORT] [--lan-allow-cidr CIDR] [--rate-limit-per-minute N] [--rate-limit-burst N] [--rate-limit-max-entries N] [--request-body-timeout-ms N] [--config-dir DIR] [--state-dir DIR] [--json]\n');
+  if (parsed.options.help || !['ensure', 'setup', 'status', 'token', 'stop', 'pair'].includes(parsed.command)) {
+    process.stdout.write('Usage: node src/launcher.js <ensure|setup|status|token|stop|pair> [--host HOST] [--port PORT] [--lan-host HOST --lan-port PORT] [--lan-allow-cidr CIDR] [--rate-limit-per-minute N] [--rate-limit-burst N] [--rate-limit-max-entries N] [--request-body-timeout-ms N] [--config-dir DIR] [--state-dir DIR] [--json]\n');
     return null;
   }
   const { command, options } = parsed;
+  if (command === 'pair') return pairBridge(options).then((result) => {
+    process.stdout.write(options.json ? `${JSON.stringify(result)}\n` : `一次性配对码：${result.code}\n5 分钟内有效，只能使用一次。配对后可控制当前 Herdr 会话。\n`);
+    return result;
+  });
   if (command === 'ensure') {
     const result = ensureBridge(options);
     process.stdout.write(`${JSON.stringify({ started: result.started, pending: Boolean(result.pending), running: Boolean(result.running), restartRequired: Boolean(result.restartRequired), reason: result.reason, pid: result.pid, host: result.config.host, port: result.config.port })}\n`);
@@ -1013,7 +1038,7 @@ export function main(argv = process.argv.slice(2)) {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  try { main(); } catch (error) {
+  try { await main(); } catch (error) {
     process.stderr.write(`herdr-mobile-bridge launcher failed: ${error.message}\n`);
     process.exitCode = 1;
   }

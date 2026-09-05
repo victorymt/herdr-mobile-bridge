@@ -11,7 +11,7 @@
     "start": "node src/index.js",
     "configure": "node scripts/configure.js",
     "ensure": "node src/launcher.js ensure",
-    "check": "node --check scripts/configure.js && node --check src/index.js && node --check src/server.js && node --check src/herdr-client.js && node --check src/config.js && node --check src/network-acl.js && node --check src/rate-limit.js && node --check src/state-store.js && node --check src/event-bus.js && node --check src/push.js && node --check src/auth.js && node --check src/launcher.js && node --check src/event-hook.js && node --check public/app.js && node --check public/ansi.js && node --check public/deep-link.js && node --check public/sw.js",
+    "check": "node --check scripts/configure.js && node --check src/index.js && node --check src/server.js && node --check src/herdr-client.js && node --check src/config.js && node --check src/network-acl.js && node --check src/lan-proxy.js && node --check src/rate-limit.js && node --check src/state-store.js && node --check src/event-bus.js && node --check src/push.js && node --check src/push-worker.js && node --check src/auth.js && node --check src/launcher.js && node --check src/event-hook.js && node --check public/app.js && node --check public/ansi.js && node --check public/deep-link.js && node --check public/sw.js",
     "test": "node --test"
   },
   "dependencies": {

@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 
 import { validSubscriptionShape } from './state-store.js';
+import { PushWorker } from './push-worker.js';
 
 const require = createRequire(import.meta.url);
 let optionalWebPush;
@@ -79,6 +80,7 @@ export class PushManager {
       ? Math.min(Math.floor(timeout), MAX_PUSH_TIMEOUT_MS)
       : PUSH_TIMEOUT_MS;
     this.logger = options.logger || console;
+    this.worker = this.store?.transactEvents ? new PushWorker(this, options) : null;
   }
 
   get publicKey() {
@@ -106,6 +108,13 @@ export class PushManager {
     return this.store.listSubscriptions();
   }
 
+  async send(subscription, payload, timeoutMs = this.timeoutMs) {
+    if (!validSubscriptionShape(subscription, { pushEndpointAllowlist: this.pushEndpointAllowlist, allowCustomEndpoints: this.allowCustomEndpoints })) {
+      throw Object.assign(new Error('invalid push subscription'), { status: 400 });
+    }
+    return withTimeout(Promise.resolve().then(() => this.sender(subscription, payload)), Math.min(this.timeoutMs, timeoutMs), 'push delivery timed out');
+  }
+
   async notify(event, options = {}) {
     const subscriptions = await this.list();
     const payload = makePushPayload(event, options);
@@ -116,7 +125,7 @@ export class PushManager {
           pushEndpointAllowlist: this.pushEndpointAllowlist,
           allowCustomEndpoints: this.allowCustomEndpoints,
         })) throw new Error('invalid push subscription endpoint');
-        const result = await this.sender(subscription, payload);
+        const result = await this.send(subscription, payload);
         results.push({ id: subscription.id, ok: true, result });
       } catch (error) {
         results.push({ id: subscription.id, ok: false, error: error?.message || String(error) });
@@ -155,7 +164,7 @@ export class PushManager {
       }
       try {
         const request = this.webPush.sendNotification(subscription, JSON.stringify(payload), {
-          TTL: normaliseTtl(payload.ttl),
+          TTL: transportTtl(payload.ttl),
           // web-push forwards this to https.request and destroys a stalled
           // socket. The outer timeout below also protects injected adapters
           // that do not implement the option.
@@ -170,7 +179,7 @@ export class PushManager {
       }
     }
     if (!this.allowRelay || typeof this.fetch !== 'function') {
-      throw new Error('web-push is unavailable; install dependencies or configure an explicit relay sender');
+      throw Object.assign(new Error('web-push is unavailable; install dependencies or configure an explicit relay sender'), { status: 400 });
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -183,7 +192,7 @@ export class PushManager {
         redirect: 'error',
         headers: {
           'content-type': 'application/json',
-          'ttl': String(normaliseTtl(payload.ttl)),
+          'ttl': String(transportTtl(payload.ttl)),
           'x-herdr-bridge-event': String(payload.event || 'agent_status'),
         },
         body: JSON.stringify(payload),
@@ -192,6 +201,7 @@ export class PushManager {
       if (!response?.ok) {
         const error = new Error(`push endpoint returned HTTP ${response?.status ?? 0}`);
         error.status = response?.status;
+        error.headers = response?.headers;
         throw error;
       }
       return { status: response.status };
@@ -199,6 +209,11 @@ export class PushManager {
       clearTimeout(timeout);
     }
   }
+}
+
+function transportTtl(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.max(1, Math.min(MAX_TTL_SECONDS, Math.floor(number))) : DEFAULT_TTL_SECONDS;
 }
 
 function withTimeout(promise, timeoutMs, message) {

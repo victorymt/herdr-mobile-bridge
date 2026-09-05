@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { URL } from 'node:url';
 import QRCode from 'qrcode';
 
-import { AuthManager, constantTimeEqual } from './auth.js';
+import { AuthManager, constantTimeEqual, parseBearer } from './auth.js';
 import { EventBus, EventInputError } from './event-bus.js';
 import {
   HerdrApiError,
@@ -881,6 +881,7 @@ export class BridgeServer {
     } catch (error) {
       this.logger.warn?.('failed to persist bridge runtime metadata', error);
     }
+    this.push.worker?.start();
     return address;
   }
 
@@ -917,11 +918,15 @@ export class BridgeServer {
     if (this.runtimeWritten) {
       try {
         const runtime = await this.store.getRuntime();
-        if (runtime.pid === process.pid) await this.store.clearRuntime();
+        if (runtime.pid === process.pid) await (this.store.clearRuntimeMarker?.() || this.store.clearRuntime());
       } catch {
         // Runtime cleanup is best effort.
       }
     }
+    await this.eventBus.processing;
+    await this.push.worker?.close();
+    this.auth.resetPairing?.();
+    this.auth.sessions?.clear();
     this.started = false;
   }
 
@@ -1066,9 +1071,13 @@ export class BridgeServer {
       return;
     }
 
-    if (pathname === '/api/auth/login' || pathname === '/api/login') {
+    if (pathname === '/api/auth/pairing-code') {
       if (req.method !== 'POST') return this.methodNotAllowed(res, ['POST']);
-      await this.handleLogin(req, res);
+      return this.handlePairingCode(req, res);
+    }
+    if (pathname === '/api/auth/login' || pathname === '/api/login' || pathname === '/api/auth/pair') {
+      if (req.method !== 'POST') return this.methodNotAllowed(res, ['POST']);
+      await this.handleLogin(req, res, pathname === '/api/auth/pair');
       return;
     }
 
@@ -1143,6 +1152,14 @@ export class BridgeServer {
       writeJson(res, 200, { ok: true, publicKey: key, vapidPublicKey: key, vapid_public_key: key });
       return;
     }
+    if (pathname === '/api/push/status') {
+      if (req.method !== 'GET') return this.methodNotAllowed(res, ['GET']);
+      if (rejectUnexpectedBody(req, res)) return;
+      const subscriptionId = url.searchParams.get('subscription_id');
+      if (!subscriptionId || subscriptionId.length > 128) return writeError(res, 400, 'invalid_subscription_id', 'subscription_id is required');
+      writeJson(res, 200, { ok: true, ...(await this.push.worker?.status(subscriptionId) || { registered: false, pending: 0, retrying: 0 }) });
+      return;
+    }
     if (pathname === '/api/push/subscriptions') {
       if (req.method === 'POST') return this.handleSubscriptionAdd(req, res);
       if (req.method === 'DELETE') return this.handleSubscriptionRemove(req, res, url);
@@ -1186,7 +1203,21 @@ export class BridgeServer {
     return body;
   }
 
-  async handleLogin(req, res) {
+  async handlePairingCode(req, res) {
+    if (!this.requestOriginAllowed(req)) return writeError(res, 403, 'origin_forbidden', 'request Origin is not allowed');
+    if (!isLoopback(req) || !this.auth.verifyOwnerToken(parseBearer(req.headers.authorization))) {
+      return writeError(res, 403, 'owner_required', 'local owner authorization required');
+    }
+    await readBody(req, this.config.maxBodyBytes, this.config.requestBodyTimeoutMs);
+    const result = this.auth.createPairingCode();
+    if (!result.ok) {
+      res.setHeader('retry-after', String(result.retryAfter));
+      return writeError(res, 429, 'rate_limited', 'pairing code generation rate limited');
+    }
+    writeJson(res, 201, { ok: true, code: result.code, expires_at: new Date(result.expiresAt).toISOString(), expires_in: 300 });
+  }
+
+  async handleLogin(req, res, pairing = false) {
     if (!this.requestOriginAllowed(req)) {
       writeError(res, 403, 'origin_forbidden', 'request Origin is not allowed');
       return;
@@ -1198,8 +1229,8 @@ export class BridgeServer {
     } catch (error) {
       return writeBodyReadError(req, res, error);
     }
-    const result = this.auth.login(body);
-    if (!result.ok) return writeError(res, 401, 'invalid_credentials', 'invalid bridge token');
+    const result = pairing ? this.auth.pair(body) : this.auth.login(body);
+    if (!result.ok) return writeError(res, 401, pairing ? 'invalid_pairing_code' : 'invalid_credentials', pairing ? '配对码无效或已过期' : 'invalid bridge token');
     const secureCookies = this.cookieSecureForRequest(req);
     writeJson(res, 200, {
       ok: true,

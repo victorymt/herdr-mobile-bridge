@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, chmod } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, chmod, open, unlink } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { dirname } from 'node:path';
@@ -232,12 +232,22 @@ export class StateStore {
     this.dedup = new Map();
     this.runtime = {};
     this.paneStatuses = new Map();
+    this.deliveries = [];
+    this.deliverySummaries = {};
     this.initialized = false;
     this.queue = Promise.resolve();
   }
 
   async init() {
     if (this.initialized) return this;
+    if (!this.initializing) this.initializing = this.initialize().catch((error) => {
+      this.initializing = null;
+      throw error;
+    });
+    return this.initializing;
+  }
+
+  async initialize() {
     if (!this.stateDir) throw new Error('stateDir is required');
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     // An existing state directory may have been created by an older release
@@ -250,8 +260,8 @@ export class StateStore {
       // Best effort on filesystems without POSIX permission bits.
     }
     await this.#loadSubscriptions();
-    await this.#loadDedup();
     await this.#loadRuntime();
+    await this.#loadDedup();
     this.initialized = true;
     return this;
   }
@@ -270,8 +280,22 @@ export class StateStore {
   }
 
   async #loadDedup() {
-    const raw = await readJson(this.dedupPath, {});
-    const entries = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    let raw = {};
+    let original;
+    try {
+      original = await readFile(this.dedupPath, 'utf8');
+      raw = JSON.parse(original);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw new Error('cannot read durable event state', { cause: error });
+    }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('invalid durable event state');
+    if (Object.hasOwn(raw, 'version')) {
+      validateEventState(raw);
+      this.paneStatuses = new Map(Object.entries(raw.pane_statuses));
+      this.deliveries = raw.deliveries;
+      this.deliverySummaries = raw.summaries;
+    }
+    const entries = raw.version === 2 ? raw.dedup : raw;
     const cutoff = this.clock() - this.dedupTtlMs;
     let processed = 0;
     for (const [key, stamp] of Object.entries(entries)) {
@@ -283,6 +307,15 @@ export class StateStore {
       }
     }
     this.#trimDedup();
+    if (raw.version !== 2) {
+      if (original !== undefined) {
+        await mkdir(dirname(this.dedupPath), { recursive: true, mode: 0o700 });
+        try { await writeFile(`${this.dedupPath}.v1.bak`, original, { mode: 0o600, flag: 'wx' }); }
+        catch (error) { if (error.code !== 'EEXIST') throw error; }
+      }
+      await this.#persistDedup();
+    }
+    this.runtime.pane_statuses = Object.fromEntries(this.paneStatuses);
   }
 
   async #loadRuntime() {
@@ -309,7 +342,38 @@ export class StateStore {
   }
 
   async #persistDedup() {
-    await this.#writeJson(this.dedupPath, Object.fromEntries(this.dedup));
+    await this.#writeJson(this.dedupPath, this.eventSnapshot());
+  }
+
+  eventSnapshot() {
+    return clone({ version: 2, dedup: Object.fromEntries(this.dedup), pane_statuses: Object.fromEntries(this.paneStatuses), deliveries: this.deliveries, summaries: this.deliverySummaries });
+  }
+
+  async transactEvents(operation) {
+    await this.init();
+    return this.#enqueue(async () => {
+      if (this.eventStateFailure) throw Object.assign(new Error('event store requires restart'), { status: 503, code: 'event_store_unavailable' });
+      const next = this.eventSnapshot();
+      const before = JSON.stringify(next);
+      const result = operation(next, clone([...this.subscriptions.values()]));
+      const cutoff = this.clock() - this.dedupTtlMs;
+      next.dedup = Object.fromEntries(Object.entries(next.dedup).filter(([, stamp]) => stamp >= cutoff).slice(-this.maxDedupEntries));
+      next.pane_statuses = Object.fromEntries(Object.entries(next.pane_statuses).slice(-this.maxPaneStatuses));
+      next.summaries = Object.fromEntries(Object.entries(next.summaries).sort((left, right) => left[1].updated_at - right[1].updated_at).slice(-this.maxSubscriptions));
+      validateEventState(next);
+      if (JSON.stringify(next) === before) return result;
+      try { await this.#writeJson(this.dedupPath, next); }
+      catch (error) {
+        if (error.commitUncertain) this.eventStateFailure = true;
+        throw Object.assign(new Error('event state persistence unavailable', { cause: error }), { status: 503, code: 'event_store_unavailable' });
+      }
+      this.dedup = new Map(Object.entries(next.dedup));
+      this.paneStatuses = new Map(Object.entries(next.pane_statuses));
+      this.deliveries = next.deliveries;
+      this.deliverySummaries = next.summaries;
+      this.runtime.pane_statuses = next.pane_statuses;
+      return result;
+    });
   }
 
   async #persistRuntime() {
@@ -323,17 +387,24 @@ export class StateStore {
     // write; init() only guarantees `stateDir` itself exists.
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     try {
-      await chmod(temporary, 0o600);
-    } catch {
-      // Best effort on non-POSIX filesystems.
-    }
-    await rename(temporary, path);
-    try {
-      await chmod(path, 0o600);
-    } catch {
-      // Best effort.
+      const handle = await open(temporary, 'wx', 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+        await handle.sync();
+      } finally { await handle.close(); }
+      await rename(temporary, path);
+      try {
+        const directory = await open(dirname(path), 'r');
+        try { await directory.sync(); } finally { await directory.close(); }
+      } catch (error) {
+        if (!['EINVAL', 'ENOTSUP', 'EBADF'].includes(error.code)) {
+          error.commitUncertain = true;
+          throw error;
+        }
+      }
+    } finally {
+      await unlink(temporary).catch(() => {});
     }
   }
 
@@ -368,15 +439,11 @@ export class StateStore {
 
   /** Atomically check and record a deduplication key. */
   async markSeen(key) {
-    await this.init();
-    return this.#enqueue(async () => {
+    return this.transactEvents((next) => {
       const normalized = String(key);
       const now = this.clock();
-      this.#trimDedup();
-      if (this.dedup.has(normalized)) return false;
-      this.dedup.set(normalized, now);
-      this.#trimDedup();
-      await this.#persistDedup();
+      if (next.dedup[normalized] >= now - this.dedupTtlMs) return false;
+      next.dedup = { ...next.dedup, [normalized]: now };
       return true;
     });
   }
@@ -438,7 +505,7 @@ export class StateStore {
       const next = sanitizeRuntime(value);
       // The gateway refreshes runtime metadata after startup without knowing
       // the launcher's process identity fields. Preserve those fields only
-      // while the PID remains the same; clearRuntime({}) drops them.
+      // while the PID remains the same; clearRuntime() drops them.
       if (next.pid && this.runtime.pid === next.pid) {
         for (const key of ['entry', 'process_start_time']) {
           if (next[key] === undefined && this.runtime[key] !== undefined) next[key] = this.runtime[key];
@@ -453,7 +520,15 @@ export class StateStore {
 
   async clearRuntime() {
     await this.init();
-    this.paneStatuses.clear();
+    await this.transactEvents((next) => {
+      next.pane_statuses = {};
+      return true;
+    });
+    return this.setRuntime({});
+  }
+
+  async clearRuntimeMarker() {
+    await this.init();
     return this.setRuntime({});
   }
 
@@ -467,8 +542,8 @@ export class StateStore {
     await this.init();
     const normalizedPaneId = boundedString(paneId, 256);
     if (!normalizedPaneId) return;
-    return this.#enqueue(async () => {
-      const previous = this.paneStatuses.get(normalizedPaneId) || {};
+    return this.transactEvents((next) => {
+      const previous = next.pane_statuses[normalizedPaneId] || {};
       const safe = value && typeof value === 'object' ? {
         pane_id: normalizedPaneId,
         workspace_id: mergeString(value, 'workspace_id', previous.workspace_id, 256),
@@ -487,17 +562,49 @@ export class StateStore {
       if (safe.state_labels && typeof safe.state_labels === 'object') {
         safe.state_labels = Object.fromEntries(Object.entries(safe.state_labels).slice(0, 32));
       }
-      this.paneStatuses.set(normalizedPaneId, safe);
-      while (this.paneStatuses.size > this.maxPaneStatuses) {
-        const first = this.paneStatuses.keys().next().value;
-        if (first === undefined) break;
-        this.paneStatuses.delete(first);
-      }
-      this.runtime.pane_statuses = Object.fromEntries(this.paneStatuses);
-      await this.#persistRuntime();
+      Object.defineProperty(next.pane_statuses, normalizedPaneId, { value: safe, enumerable: true, configurable: true, writable: true });
       return clone(safe);
     });
   }
+}
+
+function validateEventState(value) {
+  const record = (entry) => entry && typeof entry === 'object' && !Array.isArray(entry);
+  if (value.version !== 2 || !record(value.dedup) || !record(value.pane_statuses) || !record(value.summaries) || !Array.isArray(value.deliveries)) {
+    throw new Error('invalid or unsupported durable event state');
+  }
+  if (Object.keys(value.dedup).length > MAX_DEDUP_ENTRIES || Object.keys(value.pane_statuses).length > MAX_PANE_STATUSES
+    || Object.values(value.dedup).some((stamp) => !Number.isFinite(stamp))
+    || Object.entries(value.pane_statuses).some(([pane, status]) => !record(status) || !sanitizePaneStatus(pane, status))
+    || Object.keys(value.summaries).length > MAX_SUBSCRIPTIONS
+    || value.deliveries.length > 1000
+    || new Set(value.deliveries.map((task) => task?.id)).size !== value.deliveries.length
+    || value.deliveries.some((task) => !record(task) || typeof task.id !== 'string' || !task.id.length || task.id.length > 128
+      || typeof task.subscription_id !== 'string' || !task.subscription_id.length || task.subscription_id.length > 128
+      || !record(task.payload) || typeof task.pane_id !== 'string' || !Number.isFinite(task.expires_at)
+      || !Number.isFinite(task.next_attempt_at) || !Number.isSafeInteger(task.attempts) || task.attempts < 0)) {
+    throw new Error('invalid durable event state contents');
+  }
+  value.pane_statuses = Object.fromEntries(Object.entries(value.pane_statuses).map(([pane, status]) => [pane, sanitizePaneStatus(pane, status)]));
+  const payloadFields = { type: 80, view: 32, event: 80, status: 32, pane_id: 256, workspace_id: 256, agent: 120, title: 120, body: 240, url: 2048, sent_at: 64 };
+  value.deliveries = value.deliveries.map((task) => {
+    const payload = {};
+    for (const [key, limit] of Object.entries(payloadFields)) {
+      if (task.payload[key] !== undefined && task.payload[key] !== null) {
+        const text = boundedString(task.payload[key], limit);
+        if (text) payload[key] = text;
+      }
+    }
+    if (!payload.url?.startsWith('/') || payload.url.startsWith('//') || payload.url.includes('\\')) throw new Error('invalid persisted push URL');
+    return { id: task.id.slice(0, 128), subscription_id: task.subscription_id.slice(0, 128), pane_id: task.pane_id.slice(0, 256), payload, expires_at: task.expires_at, next_attempt_at: task.next_attempt_at, attempts: task.attempts };
+  });
+  value.summaries = Object.fromEntries(Object.entries(value.summaries).map(([id, entry]) => {
+    if (!record(entry) || !['accepted', 'retrying', 'failed', 'expired', 'cancelled'].includes(entry.last_result) || !Number.isFinite(entry.updated_at)) throw new Error('invalid persisted delivery summary');
+    const safe = { last_result: entry.last_result, updated_at: entry.updated_at };
+    if (Number.isFinite(entry.last_success_at)) safe.last_success_at = entry.last_success_at;
+    if (typeof entry.last_error === 'string' && /^(network_or_timeout|subscription_expired|http_\d{3})$/.test(entry.last_error)) safe.last_error = entry.last_error;
+    return [id.slice(0, 128), safe];
+  }));
 }
 
 function boundedString(value, max) {
