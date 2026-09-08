@@ -126,7 +126,7 @@ test('service worker notification clicks preserve same-origin attention links an
 });
 
 test('service worker shell cache includes the deep-link module and current version', () => {
-  assert.match(SERVICE_WORKER_SOURCE, /herdr-mobile-v27/);
+  assert.match(SERVICE_WORKER_SOURCE, /herdr-mobile-v30/);
   assert.match(SERVICE_WORKER_SOURCE, /['"]\/icon-192\.png['"]/);
   assert.match(SERVICE_WORKER_SOURCE, /['"]\/deep-link\.js['"]/);
   assert.match(SERVICE_WORKER_SOURCE, /['"]\/ansi\.js['"]/);

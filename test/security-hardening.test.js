@@ -1,4 +1,4 @@
-import test, { afterEach } from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -8,11 +8,16 @@ import { join } from 'node:path';
 import { BridgeServer } from '../src/server.js';
 import { StateStore } from '../src/state-store.js';
 
-const fixtures = new Set();
-
-async function makeServer(config = {}) {
+async function makeServer(context, config = {}) {
   const root = await mkdtemp(join(tmpdir(), 'herdr-hardening-'));
-  fixtures.add(root);
+  let server;
+  context.after(async () => {
+    try {
+      await server?.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   const stateDir = join(root, 'state');
   const paths = {
     stateDir,
@@ -25,7 +30,7 @@ async function makeServer(config = {}) {
     async snapshot() { return { version: 'test', protocol: 1, workspaces: [], panes: [] }; },
     setSocketPath() {},
   };
-  const server = new BridgeServer({
+  server = new BridgeServer({
     config: {
       host: '127.0.0.1',
       port: 0,
@@ -45,13 +50,8 @@ async function makeServer(config = {}) {
   return { server, root, base: `http://127.0.0.1:${server.address().port}` };
 }
 
-afterEach(async () => {
-  for (const root of fixtures) await rm(root, { recursive: true, force: true });
-  fixtures.clear();
-});
-
-test('protected API requests consume IP/session buckets while discovery remains exempt', async () => {
-  const fixture = await makeServer({ rateLimitPerMinute: 1, rateLimitBurst: 1 });
+test('protected API requests consume IP/session buckets while discovery remains exempt', async (context) => {
+  const fixture = await makeServer(context, { rateLimitPerMinute: 1, rateLimitBurst: 1 });
   const headers = { authorization: 'Bearer owner-token' };
   const first = await fetch(`${fixture.base}/api/state`, { headers });
   assert.equal(first.status, 200);
@@ -61,11 +61,10 @@ test('protected API requests consume IP/session buckets while discovery remains 
   assert.equal(second.headers.get('retry-after'), '60');
   const discovery = await fetch(`${fixture.base}/api/discovery`);
   assert.equal(discovery.status, 200);
-  await fixture.server.close();
 });
 
-test('login keeps the fixed five-attempt profile independently of the general API rate', async () => {
-  const fixture = await makeServer({ rateLimitPerMinute: 1, rateLimitBurst: 1 });
+test('login keeps the fixed five-attempt profile independently of the general API rate', async (context) => {
+  const fixture = await makeServer(context, { rateLimitPerMinute: 1, rateLimitBurst: 1 });
   for (let index = 0; index < 5; index += 1) {
     const response = await fetch(`${fixture.base}/api/auth/login`, {
       method: 'POST',
@@ -81,10 +80,9 @@ test('login keeps the fixed five-attempt profile independently of the general AP
   });
   assert.equal(blocked.status, 429);
   assert.equal((await blocked.json()).error.code, 'rate_limited');
-  await fixture.server.close();
 });
 
-function slowRequest(base, pathname, bodyPrefix, bodySuffix, delayMs, contentLength) {
+function slowRequest(context, base, pathname, bodyPrefix, bodySuffix, delayMs, contentLength) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, base);
     const request = http.request(url, {
@@ -96,6 +94,12 @@ function slowRequest(base, pathname, bodyPrefix, bodySuffix, delayMs, contentLen
         connection: 'close',
       },
     });
+    let timer;
+    context.after(() => {
+      clearTimeout(timer);
+      request.destroy();
+    });
+    request.once('close', () => clearTimeout(timer));
     let response;
     const chunks = [];
     request.once('response', (res) => {
@@ -108,24 +112,23 @@ function slowRequest(base, pathname, bodyPrefix, bodySuffix, delayMs, contentLen
       reject(error);
     });
     request.write(bodyPrefix);
-    setTimeout(() => {
+    timer = setTimeout(() => {
       try { request.end(bodySuffix); } catch (error) { reject(error); }
     }, delayMs);
   });
 }
 
-test('slow JSON bodies return 408 and close the request connection', async () => {
-  const fixture = await makeServer({ requestBodyTimeoutMs: 50, rateLimitPerMinute: 1000, rateLimitBurst: 1000 });
+test('slow JSON bodies return 408 and close the request connection', async (context) => {
+  const fixture = await makeServer(context, { requestBodyTimeoutMs: 50, rateLimitPerMinute: 1000, rateLimitBurst: 1000 });
   const body = JSON.stringify({ pane_id: 'p1' });
-  const response = await slowRequest(fixture.base, '/api/control/input', body.slice(0, 2), body.slice(2), 120, Buffer.byteLength(body));
+  const response = await slowRequest(context, fixture.base, '/api/control/input', body.slice(0, 2), body.slice(2), 120, Buffer.byteLength(body));
   assert.equal(response.status, 408);
   assert.equal(response.headers.connection, 'close');
   assert.match(response.body, /request_body_timeout/);
-  await fixture.server.close();
 });
 
-test('declared oversized bodies return 413 before authentication body parsing', async () => {
-  const fixture = await makeServer({ maxBodyBytes: 8, rateLimitPerMinute: 1000, rateLimitBurst: 1000 });
+test('declared oversized bodies return 413 before authentication body parsing', async (context) => {
+  const fixture = await makeServer(context, { maxBodyBytes: 8, rateLimitPerMinute: 1000, rateLimitBurst: 1000 });
   const body = JSON.stringify({ token: 'owner-token', extra: 'too-large' });
   const response = await fetch(`${fixture.base}/api/auth/login`, {
     method: 'POST',
@@ -135,11 +138,10 @@ test('declared oversized bodies return 413 before authentication body parsing', 
   assert.equal(response.status, 413);
   assert.equal(response.headers.get('connection'), 'close');
   assert.equal((await response.json()).error.code, 'body_too_large');
-  await fixture.server.close();
 });
 
-test('SSE rejects a body-bearing GET before entering the long-lived stream', async () => {
-  const fixture = await makeServer({ requestBodyTimeoutMs: 50, rateLimitPerMinute: 1000, rateLimitBurst: 1000 });
+test('SSE rejects a body-bearing GET before entering the long-lived stream', async (context) => {
+  const fixture = await makeServer(context, { requestBodyTimeoutMs: 50, rateLimitPerMinute: 1000, rateLimitBurst: 1000 });
   const response = await new Promise((resolve, reject) => {
     const request = http.request(new URL('/api/stream', fixture.base), {
       method: 'GET',
@@ -154,11 +156,11 @@ test('SSE rejects a body-bearing GET before entering the long-lived stream', asy
       res.on('data', (chunk) => chunks.push(chunk));
       res.once('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
     });
+    context.after(() => request.destroy());
     request.once('error', (error) => reject(error));
     request.end('{');
   });
   assert.equal(response.status, 400);
   assert.equal(response.headers.connection, 'close');
   assert.match(response.body, /request_body_not_allowed/);
-  await fixture.server.close();
 });

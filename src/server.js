@@ -674,6 +674,8 @@ export class BridgeServer {
     this.runtimeWritten = false;
     this.stateCache = null;
     this.stateCacheAt = 0;
+    this.stateRevision = 0;
+    this.stateRead = null;
     this.rateLimiter = options.rateLimiter === false
       ? null
       : (options.rateLimiter || new TokenBucketLimiter({
@@ -683,10 +685,7 @@ export class BridgeServer {
         now: options.now,
       }));
     this.controlInFlight = new Map();
-    this.unsubscribeStateInvalidation = this.eventBus.subscribe(() => {
-      this.stateCache = null;
-      this.stateCacheAt = 0;
-    });
+    this.unsubscribeStateInvalidation = this.eventBus.subscribe(() => this.invalidateStateCache());
   }
 
   updateSocketPath(path) {
@@ -708,6 +707,7 @@ export class BridgeServer {
   invalidateStateCache() {
     this.stateCache = null;
     this.stateCacheAt = 0;
+    this.stateRevision += 1;
   }
 
   connectionInfo(req) {
@@ -1171,6 +1171,29 @@ export class BridgeServer {
   async readState() {
     const now = Date.now();
     if (this.stateCache && now - this.stateCacheAt < 750) return this.stateCache;
+    const revision = this.stateRevision;
+    if (this.stateRead?.revision === revision) return this.stateRead.promise;
+
+    const pending = { revision };
+    pending.promise = this.readStateSnapshot().then((body) => {
+      // An event or control action may invalidate state while Herdr is still
+      // replying. Existing callers can finish, but that old result must not
+      // replace the cache used by subsequent requests.
+      if (revision === this.stateRevision) {
+        this.stateCache = body;
+        this.stateCacheAt = Date.now();
+      }
+      return body;
+    });
+    this.stateRead = pending;
+    try {
+      return await pending.promise;
+    } finally {
+      if (this.stateRead === pending) this.stateRead = null;
+    }
+  }
+
+  async readStateSnapshot() {
     try {
       const runtime = await this.store.getRuntime();
       if (runtime.socket_path && runtime.socket_path !== this.config.socketPath) this.updateSocketPath(runtime.socket_path);
@@ -1198,8 +1221,6 @@ export class BridgeServer {
       agents: clean.agents,
       pane_statuses: statuses,
     };
-    this.stateCache = body;
-    this.stateCacheAt = now;
     return body;
   }
 

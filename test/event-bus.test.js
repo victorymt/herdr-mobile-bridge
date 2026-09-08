@@ -200,6 +200,31 @@ test('detector release clears a previously persisted terminal result', async () 
   assert.equal(statuses['w1:p1'].agent, 'codex');
 });
 
+test('legacy stores accept a new anonymous lifecycle without redelivering an immediate retry', async () => {
+  const seen = new Set();
+  const statuses = {};
+  const notifications = [];
+  const bus = new EventBus({
+    store: {
+      async markSeen(key) {
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      },
+      async listPaneStatuses() { return statuses; },
+      async setPaneStatus(paneId, value) { statuses[paneId] = { ...statuses[paneId], ...value }; },
+    },
+    pushManager: { async notify(value) { notifications.push(value); } },
+  });
+  for (const status of ['done', 'working', 'done']) {
+    const payload = { event: 'pane.agent_status_changed', context: { pane_id: 'pane-1', agent: 'codex', agent_status: status } };
+    assert.equal((await bus.processIncoming(payload)).duplicate, false);
+    assert.equal((await bus.processIncoming(payload)).duplicate, true);
+  }
+  assert.equal(notifications.length, 2);
+  assert.equal(statuses['pane-1'].agent_status, 'done');
+});
+
 test('stream replay queues events published during the replay snapshot', async () => {
   const server = new BridgeServer({ config: {}, herdrClient: {} });
   const replayed = {

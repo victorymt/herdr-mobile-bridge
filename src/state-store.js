@@ -337,8 +337,18 @@ export class StateStore {
     this.runtime.pane_statuses = Object.fromEntries(this.paneStatuses);
   }
 
-  async #persistSubscriptions() {
-    await this.#writeJson(this.subscriptionsPath, [...this.subscriptions.values()]);
+  async #persistSubscriptions(subscriptions) {
+    try { await this.#writeJson(this.subscriptionsPath, [...subscriptions.values()]); }
+    catch (error) {
+      if (error.commitUncertain) this.subscriptionStateFailure = true;
+      throw Object.assign(new Error('subscription persistence unavailable', { cause: error }), { status: 503, code: 'subscription_store_unavailable' });
+    }
+  }
+
+  #assertSubscriptionsAvailable() {
+    if (this.subscriptionStateFailure) {
+      throw Object.assign(new Error('subscription store requires restart'), { status: 503, code: 'subscription_store_unavailable' });
+    }
   }
 
   async #persistDedup() {
@@ -352,6 +362,7 @@ export class StateStore {
   async transactEvents(operation) {
     await this.init();
     return this.#enqueue(async () => {
+      this.#assertSubscriptionsAvailable();
       if (this.eventStateFailure) throw Object.assign(new Error('event store requires restart'), { status: 503, code: 'event_store_unavailable' });
       const next = this.eventSnapshot();
       const before = JSON.stringify(next);
@@ -450,6 +461,7 @@ export class StateStore {
 
   async listSubscriptions() {
     await this.init();
+    this.#assertSubscriptionsAvailable();
     return clone([...this.subscriptions.values()]);
   }
 
@@ -460,19 +472,22 @@ export class StateStore {
       allowCustomEndpoints: this.allowCustomEndpoints,
     })) throw new Error('invalid push subscription');
     return this.#enqueue(async () => {
+      this.#assertSubscriptionsAvailable();
       const normalized = normalizeSubscription(value);
+      const next = new Map(this.subscriptions);
       // One endpoint represents one device; replacing it avoids duplicate
       // notifications when a browser refreshes its subscription.
-      for (const [id, existing] of this.subscriptions) {
-        if (existing.endpoint === normalized.endpoint && id !== normalized.id) this.subscriptions.delete(id);
+      for (const [id, existing] of next) {
+        if (existing.endpoint === normalized.endpoint && id !== normalized.id) next.delete(id);
       }
-      this.subscriptions.set(normalized.id, normalized);
-      while (this.subscriptions.size > this.maxSubscriptions) {
-        const first = this.subscriptions.keys().next().value;
+      next.set(normalized.id, normalized);
+      while (next.size > this.maxSubscriptions) {
+        const first = next.keys().next().value;
         if (first === undefined) break;
-        this.subscriptions.delete(first);
+        next.delete(first);
       }
-      await this.#persistSubscriptions();
+      await this.#persistSubscriptions(next);
+      this.subscriptions = next;
       return clone(normalized);
     });
   }
@@ -480,16 +495,21 @@ export class StateStore {
   async removeSubscription(criteria = {}) {
     await this.init();
     return this.#enqueue(async () => {
+      this.#assertSubscriptionsAvailable();
       let removed = false;
+      const next = new Map(this.subscriptions);
       const id = criteria.id && String(criteria.id);
       const endpoint = criteria.endpoint && String(criteria.endpoint);
-      for (const [key, value] of this.subscriptions) {
+      for (const [key, value] of next) {
         if ((id && key === id) || (endpoint && value.endpoint === endpoint)) {
-          this.subscriptions.delete(key);
+          next.delete(key);
           removed = true;
         }
       }
-      if (removed) await this.#persistSubscriptions();
+      if (removed) {
+        await this.#persistSubscriptions(next);
+        this.subscriptions = next;
+      }
       return removed;
     });
   }

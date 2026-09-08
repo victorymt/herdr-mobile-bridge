@@ -1,7 +1,7 @@
 // Bump the shell cache whenever the dashboard assets change.  The service
 // worker is cache-first for the app shell, so keeping the old name would leave
 // existing phones serving stale JavaScript (including missing control views).
-const CACHE_NAME = 'herdr-mobile-v27';
+const CACHE_NAME = 'herdr-mobile-v30';
 const APP_SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/ansi.js', '/deep-link.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {

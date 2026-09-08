@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 
 const model = {
   authenticated: false,
+  sessionGeneration: 0,
+  authRequest: null,
   connected: false,
   snapshot: null,
   panes: [],
@@ -26,6 +28,7 @@ const model = {
   pushSubscriptionId: '',
   pushSubscriptionEndpoint: '',
   deepLink: null,
+  applyDeepLinkOnSync: false,
   outputError: '',
   outputLoading: false,
   outputRequest: 0,
@@ -481,6 +484,71 @@ function paneStatus(pane) {
   return statusKey(pane?.agent_status || pane?.final_status || pane?.status || 'unknown');
 }
 
+function taskStatus(pane) {
+  const live = paneStatus(pane);
+  return live !== 'unknown' ? live : paneStatus(model.cachedState?.pane_statuses?.[pane?.pane_id]);
+}
+
+function paneLocation(pane) {
+  const workspaceId = pane?.workspace_id || model.cachedState?.pane_statuses?.[pane?.pane_id]?.workspace_id;
+  const workspace = model.workspaces.find((item) => (item.workspace_id || item.id) === workspaceId);
+  return `${workspace?.label || workspace?.name || workspaceId || '未命名工作区'} · ${pane?.pane_id || '未知窗格'}`;
+}
+
+function paneIdentity(pane, index = 0) {
+  return `${paneDisplayName(pane, index)} · ${paneLocation(pane)}`;
+}
+
+function renderTaskContext() {
+  const target = model.panes.find((pane) => pane.pane_id === model.selectedPane);
+  const status = taskStatus(target);
+  $('app-shell').dataset.status = status;
+  $('agent-heading').textContent = target ? paneDisplayName(target) : model.selectedPane ? '任务已不可用' : '选择一个任务';
+  $('agent-detail').textContent = target
+    ? `${paneLocation(target)} · ${statusLabel(status)}`
+    : model.selectedPane || '从下方任务列表或选择框中选择。';
+  $('metric-state').textContent = statusLabel(status);
+  $('metric-focus').textContent = model.snapshot?.focused_pane_id || '未选择';
+  $('metric-output').textContent = String(model.panes.length);
+  const focusedPane = model.panes.find((pane) => pane.pane_id === model.snapshot?.focused_pane_id);
+  if ($('desktop-focus')) $('desktop-focus').textContent = focusedPane
+    ? paneIdentity(focusedPane)
+    : '暂无窗格';
+}
+
+function renderTaskList() {
+  const list = $('task-list');
+  if (!list) return;
+  const priorities = { blocked: 0, working: 1, waiting: 2, done: 3, idle: 4, unknown: 5 };
+  const panes = model.panes.filter((pane) => pane.pane_id).slice().sort((a, b) => (priorities[taskStatus(a)] ?? 5) - (priorities[taskStatus(b)] ?? 5));
+  const count = panes.filter((pane) => taskStatus(pane) === 'blocked').length;
+  $('task-list-heading').textContent = count ? `${count} 个任务需要处理` : '全部任务';
+  const content = panes.length ? panes.map((pane) => {
+    const status = taskStatus(pane);
+    const selected = pane.pane_id === model.selectedPane;
+    const action = status === 'blocked' ? '查看并回复' : '查看输出';
+    return `<button type="button" class="task-card" data-open-pane="${escapeHtml(pane.pane_id)}" data-status="${escapeHtml(status)}"${selected ? ' aria-current="true"' : ''} aria-label="${escapeHtml(`${paneIdentity(pane)}，${statusLabel(status)}，${action}`)}"><span class="task-card-copy"><strong>${escapeHtml(paneDisplayName(pane))}</strong><small>${escapeHtml(paneLocation(pane))}</small></span><span class="task-card-status">${escapeHtml(statusLabel(status))}<small>${action} →</small></span></button>`;
+  }).join('') : '<div class="empty-state">暂无任务。请先在电脑中打开一个 Herdr 窗格。</div>';
+  if (list.innerHTML === content) return;
+  const focusedId = list.contains(document.activeElement) ? document.activeElement.closest('[data-open-pane]')?.dataset.openPane : '';
+  list.innerHTML = content;
+  if (focusedId) [...list.querySelectorAll('[data-open-pane]')].find((button) => button.dataset.openPane === focusedId)?.focus({ preventScroll: true });
+}
+
+function openTask(paneId) {
+  const pane = model.panes.find((item) => item.pane_id === paneId);
+  if (!pane) return;
+  model.selectedPane = paneId;
+  clearControlError('prompt-error');
+  clearControlError('input-error');
+  renderPaneSelect();
+  if (taskStatus(pane) === 'blocked') {
+    model.attention = { pane: paneId, workspace: pane.workspace_id, agent: paneDisplayName(pane), event: 'pane_agent_status_changed' };
+    renderAttention();
+    switchView('attention');
+  } else switchView('output');
+}
+
 function renderStatusGrid(data) {
   const focusedPane = data.panes?.find((pane) => pane.pane_id === data.focused_pane_id);
   const persisted = data.pane_statuses?.[data.focused_pane_id];
@@ -489,8 +557,8 @@ function renderStatusGrid(data) {
     : paneStatus(persisted) !== 'unknown' ? paneStatus(persisted) : 'idle';
   const currentWorkspace = data.workspaces?.find((item) => item.workspace_id === data.focused_workspace_id);
   const values = [
-    ['运行状态', statusLabel(status), ['working', 'done'].includes(status) ? 'good' : ''],
-    ['工作区', currentWorkspace?.label || data.focused_workspace_id || '未选择', ''],
+    ['电脑显示状态', statusLabel(status), ['working', 'done'].includes(status) ? 'good' : ''],
+    ['电脑工作区', currentWorkspace?.label || data.focused_workspace_id || '未选择', ''],
     ['窗格数量', String(data.panes?.length || 0), ''],
     ['协议', data.protocol ? `v${data.protocol}` : '—', ''],
   ];
@@ -498,6 +566,7 @@ function renderStatusGrid(data) {
 }
 
 function renderOutput() {
+  renderOutputControls();
   const text = model.output || '';
   const styledOutput = Boolean(text) && !model.outputLoading && !model.outputError;
   const message = model.outputLoading
@@ -522,7 +591,8 @@ function renderOutput() {
     else node.textContent = value;
     if (shouldScroll) node.scrollTop = node.scrollHeight;
   };
-  put(preview, model.outputLoading ? '正在读取…' : (text || '暂无输出'), false, styledOutput);
+  const previewMessage = model.outputLoading ? '正在读取…' : model.outputError || text || (model.outputPaneId ? '该任务暂无输出' : '点击任务或“查看全部”读取最近输出。');
+  put(preview, previewMessage, false, styledOutput && previewMessage === text);
   put(consoleNode, message, false, styledOutput && message === text);
   if (attentionConsole) {
     const attentionMessage = !attentionOutputMatches
@@ -557,29 +627,58 @@ function renderOutput() {
 
 function renderPaneSelect() {
   const current = model.selectedPane;
-  const available = model.panes.some((pane) => pane.pane_id === current);
-  let options = '<option value="">选择窗格</option>' + model.panes.map((pane, index) => `<option value="${escapeHtml(pane.pane_id || '')}">${escapeHtml(paneDisplayName(pane, index))} · ${escapeHtml(statusLabel(paneStatus(pane)))}</option>`).join('');
-  if (current && !available) options += `<option value="${escapeHtml(current)}" disabled>通知目标不可用 · ${escapeHtml(current)}</option>`;
-  for (const select of [$('output-pane'), $('control-pane')].filter(Boolean)) {
-    select.innerHTML = options;
-    if (current) select.value = current;
+  if (model.outputPaneId && model.outputPaneId !== current) {
+    invalidateOutputRequest();
+    model.output = '';
+    model.outputPlain = '';
+    model.outputPaneId = '';
+    model.outputError = '';
   }
+  const available = model.panes.some((pane) => pane.pane_id === current);
+  let options = '<option value="">选择任务</option>' + model.panes.map((pane, index) => `<option value="${escapeHtml(pane.pane_id || '')}">${escapeHtml(paneIdentity(pane, index))} · ${escapeHtml(statusLabel(taskStatus(pane)))}</option>`).join('');
+  if (current && !available) options += `<option value="${escapeHtml(current)}" disabled>通知目标不可用 · ${escapeHtml(current)}</option>`;
   const target = model.panes.find((pane) => pane.pane_id === current);
+  const targetLabel = target ? `${paneIdentity(target)} · ${statusLabel(taskStatus(target))}` : current || '未选择窗格';
+  const contextSelect = $('context-pane');
+  if (contextSelect) {
+    contextSelect.innerHTML = options;
+    contextSelect.value = current;
+    contextSelect.disabled = model.activeView === 'attention' && Boolean(model.attention?.pane);
+  }
   const hint = $('control-target-hint');
-  if (hint) hint.textContent = !model.connected
+  const contextHint = $('context-hint');
+  const targetHint = !model.connected
     ? '当前离线，恢复连接后才能操作。'
     : target
-      ? `${paneDisplayName(target)} · ${statusLabel(paneStatus(target))}`
+      ? '输入只会发送到上面这项任务。'
       : current
         ? '通知目标已不可用，请刷新状态或选择其他窗格。'
         : '先选择一个窗格。';
+  if (hint) hint.textContent = targetHint;
+  if (contextHint) contextHint.textContent = !model.connected
+    ? '当前离线，恢复连接后才能操作。'
+    : target
+      ? model.activeView === 'attention' ? '正在查看此任务，返回任务列表可切换。' : '下方输出和回复均属于此任务。'
+      : current
+        ? '通知目标已不可用，请刷新状态或选择其他窗格。'
+        : '选择一个任务，查看输出或回复。';
+  const outputTarget = $('output-target-label');
+  if (outputTarget) outputTarget.textContent = targetLabel;
+  const controlTarget = $('control-target-name');
+  if (controlTarget) controlTarget.textContent = targetLabel;
   for (const button of [$('prompt-button'), $('input-text-button'), ...document.querySelectorAll('[data-input-key]')].filter(Boolean)) {
     button.disabled = !model.connected || !current || !available || model.controlBusy;
   }
   const attentionFocus = $('attention-focus-button');
-  if (attentionFocus) attentionFocus.disabled = !model.connected || !current || !available;
-  const outputLoader = $('load-output');
-  if (outputLoader) outputLoader.disabled = !model.connected || !current || !available;
+  if (attentionFocus) attentionFocus.disabled = !model.connected || !current || !available || model.focusBusy;
+  renderTaskContext();
+  renderTaskList();
+  renderOutputControls();
+}
+
+function renderOutputControls() {
+  const current = model.selectedPane;
+  const available = model.panes.some((pane) => pane.pane_id === current);
   const outputRefresh = $('output-refresh');
   if (outputRefresh) outputRefresh.disabled = !model.connected || !current || !available || model.outputLoading;
   const attentionRefresh = $('attention-output-refresh');
@@ -587,10 +686,9 @@ function renderPaneSelect() {
 }
 
 function attentionStatus() {
-  const requested = model.attention?.status;
-  if (requested) return statusKey(requested);
   const pane = model.panes.find((item) => item.pane_id === model.attention?.pane);
-  return paneStatus(pane);
+  const live = taskStatus(pane);
+  return live !== 'unknown' ? live : statusKey(model.attention?.status);
 }
 
 function attentionDetail(status, pane, paneId) {
@@ -619,6 +717,7 @@ function renderAttention() {
   syncMobileAttentionNav();
   if (!attention) {
     if (tab) tab.hidden = true;
+    $('attention-view')?.removeAttribute('data-status');
     return;
   }
   const pane = model.panes.find((item) => item.pane_id === attention.pane);
@@ -628,6 +727,13 @@ function renderAttention() {
     if (badge) badge.textContent = attentionStatus() === 'done' ? '✓' : '!';
   }
   const status = attentionStatus();
+  const attentionView = $('attention-view');
+  if (attentionView) attentionView.dataset.status = status || 'unknown';
+  const outputBlock = $('attention-output-block');
+  const controlHeading = $('attention-control-heading');
+  if (attentionView && outputBlock && controlHeading) {
+    attentionView.insertBefore(outputBlock, controlHeading);
+  }
   const summaryIcon = $('attention-summary')?.querySelector('.attention-summary-icon');
   if (summaryIcon) {
     summaryIcon.textContent = status === 'done' ? '✓' : '!';
@@ -640,12 +746,16 @@ function renderAttention() {
   }
   const heading = $('attention-heading');
   if (heading) heading.textContent = status === 'blocked' ? '需要你的关注' : status === 'done' ? '任务已完成' : '会话状态更新';
-  const agent = attention.agent || pane?.display_agent || pane?.agent || 'Herdr 会话';
+  const agent = pane ? paneIdentity(pane) : attention.agent || 'Herdr 会话';
   const detail = attentionDetail(status, pane, attention.pane);
   if ($('attention-agent')) $('attention-agent').textContent = agent;
   if ($('attention-detail')) $('attention-detail').textContent = detail;
   if ($('attention-pane')) $('attention-pane').textContent = attention.pane || '未提供';
-  if ($('attention-workspace')) $('attention-workspace').textContent = attention.workspace || pane?.workspace_id || '未提供';
+  if ($('attention-workspace')) {
+    const workspaceId = pane?.workspace_id || attention.workspace;
+    const workspace = model.workspaces.find((item) => (item.workspace_id || item.id) === workspaceId);
+    $('attention-workspace').textContent = workspace?.label || workspace?.name || workspaceId || '未提供';
+  }
   if ($('attention-event')) $('attention-event').textContent = eventLabel(attention.event);
   const focus = $('attention-focus-button');
   if (focus) focus.disabled = !model.connected || model.focusBusy || !attention.pane || !model.panes.some((pane) => pane.pane_id === attention.pane);
@@ -663,7 +773,7 @@ function renderFocus() {
   list.innerHTML = model.panes.map((pane, index) => {
     const id = pane.pane_id || '';
     const active = id === model.snapshot?.focused_pane_id;
-    return `<div class="focus-item"><div><strong>${escapeHtml(paneDisplayName(pane, index))}</strong><small>${escapeHtml(statusLabel(paneStatus(pane)))}${active ? ' · 当前聚焦' : ''}${pane.workspace_id ? ` · ${escapeHtml(pane.workspace_id)}` : ''}</small></div><button type="button" data-focus-pane="${escapeHtml(id)}" ${active || model.focusBusy || !model.connected ? 'disabled' : ''}>${active ? '已聚焦' : model.focusBusy ? '处理中…' : '聚焦'}</button></div>`;
+    return `<div class="focus-item"><div><strong>${escapeHtml(paneDisplayName(pane, index))}</strong><small>${escapeHtml(paneLocation(pane))} · ${escapeHtml(statusLabel(taskStatus(pane)))}</small></div><button type="button" data-focus-pane="${escapeHtml(id)}" ${active || model.focusBusy || !model.connected ? 'disabled' : ''}>${active ? '电脑正在显示' : model.focusBusy ? '处理中…' : '在电脑中打开'}</button></div>`;
   }).join('');
   renderPaneSelect();
 }
@@ -677,14 +787,14 @@ function renderWorkspaces() {
     const id = workspace.workspace_id || workspace.id || '';
     const label = workspace.label || workspace.name || `工作区 ${index + 1}`;
     const active = id === focused;
-    return `<div class="focus-item"><div><strong>${escapeHtml(label)}</strong><small>${active ? '当前聚焦' : `${workspace.pane_count ?? workspace.panes?.length ?? 0} 个窗格`}</small></div><button type="button" data-focus-workspace="${escapeHtml(id)}" ${active || model.focusBusy || !model.connected ? 'disabled' : ''}>${active ? '已聚焦' : model.focusBusy ? '处理中…' : '聚焦'}</button></div>`;
+    return `<div class="focus-item"><div><strong>${escapeHtml(label)}</strong><small>${escapeHtml(id)} · ${workspace.pane_count ?? workspace.panes?.length ?? 0} 个窗格</small></div><button type="button" data-focus-workspace="${escapeHtml(id)}" ${active || model.focusBusy || !model.connected ? 'disabled' : ''}>${active ? '电脑正在显示' : model.focusBusy ? '处理中…' : '在电脑中打开'}</button></div>`;
   }).join('');
 }
 
 function render(data, { cached = false } = {}) {
   const body = data && typeof data === 'object' ? data : {};
   const snapshot = body.snapshot && typeof body.snapshot === 'object' ? body.snapshot : body;
-  model.snapshot = snapshot;
+  model.snapshot = { ...snapshot, ...body };
   model.cachedState = offlineSafeState(body);
   // A cached render must not refresh the cache timestamp: repeatedly opening
   // the page while offline should eventually expire old state instead of
@@ -695,19 +805,8 @@ function render(data, { cached = false } = {}) {
   const focusedPaneId = body.focused_pane_id || snapshot.focused_pane_id;
   const attentionPane = model.attention?.pane;
   if (!model.selectedPane || (!model.panes.some((pane) => pane.pane_id === model.selectedPane) && !attentionPane)) {
-    model.selectedPane = attentionPane || focusedPaneId || '';
+    model.selectedPane = attentionPane || model.panes.find((pane) => taskStatus(pane) === 'blocked')?.pane_id || focusedPaneId || model.panes[0]?.pane_id || '';
   }
-  const focusedPane = model.panes.find((pane) => pane.pane_id === focusedPaneId);
-  const persisted = body.pane_statuses?.[focusedPaneId] || snapshot.pane_statuses?.[focusedPaneId];
-  const liveStatus = paneStatus(focusedPane);
-  const status = liveStatus !== 'unknown' ? liveStatus : paneStatus(persisted);
-  $('app-shell').dataset.status = status || 'unknown';
-  const persistedName = persisted?.display_agent || persisted?.agent || persisted?.title;
-  $('agent-heading').textContent = focusedPane ? paneDisplayName(focusedPane) : (persistedName || model.workspaces.find((item) => item.workspace_id === (body.focused_workspace_id || snapshot.focused_workspace_id))?.label || 'Herdr 会话');
-  $('agent-detail').textContent = status === 'working' ? '智能体正在处理任务…' : status === 'blocked' ? '智能体需要你的关注' : status === 'done' ? '最近任务已完成' : '当前没有运行中的任务';
-  $('metric-state').textContent = statusLabel(status);
-  $('metric-focus').textContent = body.focused_pane_id || snapshot.focused_pane_id || '未选择';
-  $('metric-output').textContent = String(model.panes.length);
   const now = new Date();
   if (!cached) model.lastSyncAt = Date.now();
   const generated = Date.parse(body.generated_at || '');
@@ -730,33 +829,35 @@ function render(data, { cached = false } = {}) {
 async function refreshState({ quiet = false } = {}) {
   if (model.stateRequest) {
     model.stateRefreshQueued = true;
-    return model.stateRequest;
+    return model.stateRequest.promise;
   }
-  const run = (async () => {
+  const generation = model.sessionGeneration;
+  const request = { controller: new AbortController(), promise: null };
+  const current = () => generation === model.sessionGeneration && model.stateRequest === request;
+  model.stateRequest = request;
+  request.promise = (async () => {
     try {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         const error = new Error('offline');
         error.code = 'offline';
         throw error;
       }
-      const data = await api('/api/state');
+      const data = await api('/api/state', { signal: request.controller.signal });
+      if (!current()) return null;
+      if (navigator.onLine === false) throw Object.assign(new Error('offline'), { code: 'offline' });
       render(data);
       model.stale = false;
       setConnection(true);
+      if (model.applyDeepLinkOnSync && model.authenticated) {
+        model.applyDeepLinkOnSync = false;
+        applyDeepLink();
+      }
       return data;
     } catch (error) {
+      if (!current()) return null;
       if (error.status === 401) {
-        setSessionMarker(false);
-        storageRemove(CACHE_KEY);
-        setAuthenticated(false);
-        closeStream();
-        model.outputRequest += 1;
-        model.outputLoading = false;
-        model.output = '';
-        model.outputPlain = '';
-        model.outputPaneId = '';
-        model.outputError = '';
-        renderOutput();
+        resetSession();
+        throw error;
       }
       const reason = error.code === 'offline'
         ? '当前设备离线，显示最近一次状态；恢复网络后将自动同步。'
@@ -765,19 +866,75 @@ async function refreshState({ quiet = false } = {}) {
       if (!quiet && error.status !== 401 && error.code !== 'offline') showToast(statusErrorMessage(error, '无法读取 Herdr 状态'));
       throw error;
     } finally {
-      $('refresh-button')?.classList.remove('is-spinning');
+      if (current()) $('refresh-button')?.classList.remove('is-spinning');
     }
   })();
-  model.stateRequest = run;
   try {
-    return await run;
+    return await request.promise;
   } finally {
-    if (model.stateRequest === run) model.stateRequest = null;
-    if (model.stateRefreshQueued) {
-      model.stateRefreshQueued = false;
-      scheduleStateRefresh(0);
+    if (current()) {
+      model.stateRequest = null;
+      if (model.stateRefreshQueued) {
+        model.stateRefreshQueued = false;
+        scheduleStateRefresh(0);
+      }
     }
   }
+}
+
+function cancelStateRequest() {
+  model.stateRequest?.controller.abort();
+  model.stateRequest = null;
+  model.stateRefreshQueued = false;
+  clearTimeout(model.stateRefreshTimer);
+  model.stateRefreshTimer = null;
+  $('refresh-button')?.classList.remove('is-spinning');
+}
+
+function invalidateOutputRequest() {
+  model.outputRequest += 1;
+  model.outputLoading = false;
+  clearTimeout(model.outputRefreshTimer);
+  model.outputRefreshTimer = null;
+}
+
+function resetSession() {
+  // Abort saves work; the generation/identity guards also reject responses
+  // whose bodies or continuations had already arrived before cancellation.
+  model.sessionGeneration += 1;
+  cancelStateRequest();
+  invalidateOutputRequest();
+  closeStream();
+  cancelStreamResync();
+  model.streamGeneration = '';
+  model.streamReset = false;
+  model.snapshot = null;
+  model.panes = [];
+  model.workspaces = [];
+  model.selectedPane = '';
+  model.output = '';
+  model.outputPlain = '';
+  model.outputPaneId = '';
+  model.outputError = '';
+  model.attention = null;
+  model.applyDeepLinkOnSync = false;
+  model.cachedState = null;
+  model.lastSyncAt = 0;
+  model.focusBusy = false;
+  model.controlBusy = false;
+  for (const id of ['prompt-text', 'input-text']) $(id).value = '';
+  for (const id of ['prompt-error', 'input-error']) clearControlError(id);
+  for (const button of [$('prompt-button'), $('input-text-button'), ...document.querySelectorAll('[data-input-key]')]) {
+    button.dataset.busy = 'false';
+    button.classList.remove('is-loading');
+  }
+  updateControlCounts();
+  setSessionMarker(false);
+  storageRemove(CACHE_KEY);
+  setAuthenticated(false);
+  setConnection(false);
+  renderOutput();
+  renderAttention();
 }
 
 function scheduleStateRefresh(delay = STATE_DEBOUNCE_MS) {
@@ -821,7 +978,7 @@ function scheduleStreamRetry() {
 }
 
 function connectStream() {
-  if (!model.authenticated || !window.EventSource) return;
+  if (!model.authenticated || navigator.onLine === false || !window.EventSource) return;
   clearTimeout(model.streamResyncTimer);
   model.streamResyncTimer = null;
   model.streamResyncing = false;
@@ -833,18 +990,22 @@ function connectStream() {
   model.streamReset = false;
   const stream = new EventSource(`/api/stream${query}`, { withCredentials: true });
   model.stream = stream;
-  stream.onopen = () => { model.streamRetryCount = 0; setConnection(true); clearTimeout(model.retryTimer); };
-  stream.onerror = () => { setConnection(false, '实时连接已断开，正在重试；请检查 VPN 是否允许局域网。'); scheduleStateRefresh(0); scheduleStreamRetry(); };
-  stream.onmessage = handleStreamEvent;
-  stream.addEventListener('ready', handleStreamReady);
-  stream.addEventListener('resync_required', handleStreamResync);
-  stream.addEventListener('pane_agent_status_changed', handleStreamEvent);
-  stream.addEventListener('pane_agent_detected', handleStreamEvent);
-  stream.addEventListener('pane_output_changed', handleStreamEvent);
+  const generation = model.sessionGeneration;
+  const guard = (handler) => (event) => {
+    if (generation === model.sessionGeneration && model.stream === stream && model.authenticated) handler(event);
+  };
+  stream.onopen = guard(() => { model.streamRetryCount = 0; clearTimeout(model.retryTimer); });
+  stream.onerror = guard(() => { setConnection(false, '实时连接已断开，正在重试；请检查 VPN 是否允许局域网。'); scheduleStateRefresh(0); scheduleStreamRetry(); });
+  stream.onmessage = guard(handleStreamEvent);
+  stream.addEventListener('ready', guard(handleStreamReady));
+  stream.addEventListener('resync_required', guard(handleStreamResync));
+  stream.addEventListener('pane_agent_status_changed', guard(handleStreamEvent));
+  stream.addEventListener('pane_agent_detected', guard(handleStreamEvent));
+  stream.addEventListener('pane_output_changed', guard(handleStreamEvent));
 }
 
 function handleStreamReady(event) {
-  setConnection(true);
+  if (!model.connected) scheduleStateRefresh(0);
   try {
     const payload = JSON.parse(event.data || '{}');
     const context = payload.context && typeof payload.context === 'object' ? payload.context : {};
@@ -905,96 +1066,108 @@ function handleStreamEvent(event) {
 
 async function login(event) {
   event.preventDefault();
+  if (model.authRequest) return;
   const pairing = $('login-method').value === 'pair';
   const code = $('pairing-code').value.trim();
   const token = $('token').value.trim();
   if (pairing ? !/^\d{8}$/.test(code) : !token) { $('login-error').textContent = pairing ? '请输入 8 位数字配对码' : '请输入访问令牌'; return; }
+  resetSession();
+  const generation = model.sessionGeneration;
+  const operation = {};
+  model.authRequest = operation;
   const button = $('login-button');
   button.disabled = true;
   button.classList.add('is-loading');
   $('login-error').textContent = '';
   try {
     await api(pairing ? '/api/auth/pair' : '/api/auth/login', { method: 'POST', body: JSON.stringify(pairing ? { code } : { token }), headers: { 'Content-Type': 'application/json' } });
+    if (generation !== model.sessionGeneration) return;
     $('token').value = '';
     $('pairing-code').value = '';
     setSessionMarker(true);
     setAuthenticated(true);
-    await refreshState({ quiet: true });
+    // If this first sync is interrupted by going offline, the next valid
+    // snapshot must still restore the pane carried by a notification URL.
+    model.applyDeepLinkOnSync = true;
+    const data = await refreshState({ quiet: true });
+    if (generation !== model.sessionGeneration || !data) return;
     connectStream();
-    // A notification can open the login screen with a pane/workspace query
-    // still attached. Apply it after the first authenticated snapshot too,
-    // not only during the initial already-authenticated boot path.
-    applyDeepLink();
     scheduleMobileNavProtection();
   } catch (error) {
+    if (model.authRequest !== operation) return;
     // A successful token exchange can still be followed by an unavailable
     // Herdr socket. Return to the login surface in that case instead of
     // leaving an authenticated-looking shell with no state behind it.
-    closeStream();
-    setSessionMarker(false);
-    setAuthenticated(false);
+    resetSession();
     $('login-error').textContent = error.status === 429 ? '尝试次数过多，请稍后再试' : (error.status === 403 ? '来源未被允许，请使用配置的 HTTPS 地址' : pairing && error.status === 401 ? '配对码无效或已过期，请在电脑重新生成' : statusErrorMessage(error, '凭据无效或服务不可用'));
   } finally {
-    button.disabled = false;
-    button.classList.remove('is-loading');
+    if (model.authRequest === operation) {
+      model.authRequest = null;
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    }
   }
 }
 
 async function logout() {
-  try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* session may already be gone */ }
-  closeStream();
-  cancelStreamResync();
-  clearTimeout(model.stateRefreshTimer);
-  clearTimeout(model.outputRefreshTimer);
-  model.stateRefreshTimer = null;
-  model.outputRefreshTimer = null;
-  // Invalidate an in-flight output read and clear terminal text before the
-  // authenticated shell is hidden. A late response must not repopulate the
-  // dashboard after a subsequent login.
-  model.outputRequest += 1;
-  model.outputLoading = false;
-  model.output = '';
-  model.outputPlain = '';
-  model.outputPaneId = '';
-  model.outputError = '';
-  renderOutput();
-  setSessionMarker(false);
-  storageRemove(CACHE_KEY);
-  model.cachedState = null;
-  setAuthenticated(false);
-  setConnection(false);
+  if (model.authRequest?.logout) return;
+  const operation = { logout: true };
+  model.authRequest = operation;
+  // Build the request while the CSRF cookie is still available, then hide
+  // local state immediately. Serialize login behind cookie revocation.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  const request = api('/api/auth/logout', { method: 'POST', signal: controller.signal });
+  resetSession();
+  $('login-button').disabled = true;
+  try { await request; } catch { /* session may already be gone */ }
+  finally {
+    clearTimeout(timeout);
+    if (model.authRequest === operation) {
+      model.authRequest = null;
+      $('login-button').disabled = false;
+      $('login-button').classList.remove('is-loading');
+    }
+  }
 }
 
 async function focusPane(id) {
   if (!id) return;
-  if (!model.connected) { showToast('当前离线，恢复连接后才能聚焦窗格'); return; }
+  if (!model.connected) { showToast('当前离线，恢复连接后才能在电脑中打开'); return; }
   if (model.focusBusy) return;
+  const generation = model.sessionGeneration;
   model.focusBusy = true;
   renderFocus();
   try {
     await api('/api/focus/pane', { method: 'POST', body: JSON.stringify({ pane_id: id }) });
-    model.selectedPane = id;
+    if (generation !== model.sessionGeneration) return;
     await refreshState({ quiet: true });
-    showToast('已聚焦窗格');
-  } catch (error) { showToast(controlErrorMessage(error, '聚焦失败')); }
-  finally { model.focusBusy = false; renderFocus(); }
+    if (generation !== model.sessionGeneration) return;
+    showToast('已在电脑中打开');
+    returnToOverviewAfterAction();
+  } catch (error) { if (generation === model.sessionGeneration) showToast(controlErrorMessage(error, '在电脑中打开失败')); }
+  finally { if (generation === model.sessionGeneration) { model.focusBusy = false; renderFocus(); } }
 }
 
 async function focusWorkspace(id) {
   if (!id) return;
-  if (!model.connected) { showToast('当前离线，恢复连接后才能聚焦工作区'); return; }
+  if (!model.connected) { showToast('当前离线，恢复连接后才能在电脑中打开工作区'); return; }
   if (model.focusBusy) return;
+  const generation = model.sessionGeneration;
   model.focusBusy = true;
   renderFocus();
   try {
     await api('/api/focus/workspace', { method: 'POST', body: JSON.stringify({ workspace_id: id }) });
+    if (generation !== model.sessionGeneration) return;
     await refreshState({ quiet: true });
-    showToast('已聚焦工作区');
-  } catch (error) { showToast(statusErrorMessage(error, '聚焦工作区失败')); }
-  finally { model.focusBusy = false; renderFocus(); }
+    if (generation !== model.sessionGeneration) return;
+    showToast('已在电脑中打开工作区');
+  } catch (error) { if (generation === model.sessionGeneration) showToast(statusErrorMessage(error, '打开工作区失败')); }
+  finally { if (generation === model.sessionGeneration) { model.focusBusy = false; renderFocus(); } }
 }
 
 async function loadPaneOutput(id = model.selectedPane, { view = 'output', preserve = false, quiet = false } = {}) {
+  invalidateOutputRequest();
   // An attention refresh is always scoped to the pane carried by the
   // notification. Ignore a stale selector value if a user changed panes in
   // the general output view just before returning here.
@@ -1031,7 +1204,7 @@ async function loadPaneOutput(id = model.selectedPane, { view = 'output', preser
   }
   model.outputError = '';
   model.outputLoading = true;
-  const requestId = ++model.outputRequest;
+  const requestId = model.outputRequest;
   renderPaneSelect();
   renderAttention();
   renderOutput();
@@ -1044,7 +1217,6 @@ async function loadPaneOutput(id = model.selectedPane, { view = 'output', preser
     model.outputLoading = false;
     renderOutput();
     renderAttention();
-    if (view === 'output') switchView('output');
     return true;
   } catch (error) {
     if (requestId !== model.outputRequest) return false;
@@ -1127,6 +1299,8 @@ function controlErrorMessage(error, fallback) {
 
 async function sendAgentPrompt(event) {
   event.preventDefault();
+  if (model.controlBusy) return;
+  const generation = model.sessionGeneration;
   const paneId = model.selectedPane;
   const text = $('prompt-text')?.value || '';
   clearControlError('prompt-error');
@@ -1134,7 +1308,7 @@ async function sendAgentPrompt(event) {
   if (!paneId) { $('prompt-error').textContent = '请先选择目标窗格。'; return; }
   if (!text.trim()) { $('prompt-error').textContent = '请输入任务内容。'; return; }
   const pane = model.panes.find((item) => item.pane_id === paneId);
-  const name = pane ? paneDisplayName(pane) : paneId;
+  const name = pane ? paneIdentity(pane) : paneId;
   if (typeof window.confirm === 'function' && !window.confirm(`将任务发送到“${name}”吗？\n\n${text.slice(0, 180)}${text.length > 180 ? '…' : ''}`)) return;
   const button = $('prompt-button');
   button.disabled = true;
@@ -1143,6 +1317,7 @@ async function sendAgentPrompt(event) {
   model.controlBusy = true;
   try {
     await api('/api/control/prompt', { method: 'POST', body: JSON.stringify({ pane_id: paneId, text }) });
+    if (generation !== model.sessionGeneration) return;
     $('prompt-text').value = '';
     updateControlCounts();
     showToast('任务已发送');
@@ -1152,20 +1327,25 @@ async function sendAgentPrompt(event) {
     try {
       await refreshState({ quiet: true });
     } catch (refreshError) {
-      if (refreshError.status !== 401) showToast('任务已发送，但状态刷新失败');
+      if (generation === model.sessionGeneration && refreshError.status !== 401) showToast('任务已发送，但状态刷新失败');
     }
+    if (generation === model.sessionGeneration) returnToOverviewAfterAction();
   } catch (error) {
-    $('prompt-error').textContent = controlErrorMessage(error, '任务发送失败');
+    if (generation === model.sessionGeneration) $('prompt-error').textContent = controlErrorMessage(error, '任务发送失败');
   } finally {
-    model.controlBusy = false;
-    button.dataset.busy = 'false';
-    button.classList.remove('is-loading');
-    renderPaneSelect();
+    if (generation === model.sessionGeneration) {
+      model.controlBusy = false;
+      button.dataset.busy = 'false';
+      button.classList.remove('is-loading');
+      renderPaneSelect();
+    }
   }
 }
 
 async function sendPaneInput({ key, event } = {}) {
   event?.preventDefault();
+  if (model.controlBusy) return;
+  const generation = model.sessionGeneration;
   const paneId = model.selectedPane;
   const text = $('input-text')?.value || '';
   const keys = key ? [key] : [];
@@ -1173,7 +1353,8 @@ async function sendPaneInput({ key, event } = {}) {
   if (!model.connected) { $('input-error').textContent = '当前离线，恢复连接后才能发送输入。'; return; }
   if (!paneId) { $('input-error').textContent = '请先选择目标窗格。'; return; }
   if (!text && !keys.length) { $('input-error').textContent = '请输入文字或选择一个按键。'; return; }
-  if (['ctrl+c', 'ctrl+d', 'ctrl+z'].includes(key) && typeof window.confirm === 'function' && !window.confirm(`向当前窗格发送 ${key}？`)) return;
+  const pane = model.panes.find((item) => item.pane_id === paneId);
+  if (['ctrl+c', 'ctrl+d', 'ctrl+z'].includes(key) && typeof window.confirm === 'function' && !window.confirm(`向“${pane ? paneIdentity(pane) : paneId}”发送 ${key}？`)) return;
   const button = key
     ? [...document.querySelectorAll('[data-input-key]')].find((node) => node.dataset.inputKey === key)
     : $('input-text-button');
@@ -1182,20 +1363,24 @@ async function sendPaneInput({ key, event } = {}) {
   renderPaneSelect();
   try {
     await api('/api/control/input', { method: 'POST', body: JSON.stringify({ pane_id: paneId, text, keys }) });
+    if (generation !== model.sessionGeneration) return;
     $('input-text').value = '';
     updateControlCounts();
-    showToast(key ? `已发送 ${key}` : '文字已发送');
+    showToast(key === 'enter' ? '已输入并回车' : key ? `已发送 ${key}` : '文字已输入，尚未回车');
     try {
       await refreshState({ quiet: true });
     } catch (refreshError) {
-      if (refreshError.status !== 401) showToast('输入已发送，但状态刷新失败');
+      if (generation === model.sessionGeneration && refreshError.status !== 401) showToast('输入已发送，但状态刷新失败');
     }
+    if (generation === model.sessionGeneration) returnToOverviewAfterAction();
   } catch (error) {
-    $('input-error').textContent = controlErrorMessage(error, '输入发送失败');
+    if (generation === model.sessionGeneration) $('input-error').textContent = controlErrorMessage(error, '输入发送失败');
   } finally {
-    model.controlBusy = false;
-    if (button) button.classList.remove('is-loading');
-    renderPaneSelect();
+    if (generation === model.sessionGeneration) {
+      model.controlBusy = false;
+      if (button) button.classList.remove('is-loading');
+      renderPaneSelect();
+    }
   }
 }
 
@@ -1204,6 +1389,31 @@ function mountControlSurface(view) {
   if (!surface) return;
   const destination = view === 'attention' ? $('attention-control-slot') : $('control-surface-home');
   if (destination && surface.parentElement !== destination) destination.appendChild(surface);
+}
+
+function clearAttentionDeepLink() {
+  if (typeof window.history?.replaceState !== 'function') return;
+  const url = new URL(window.location.href);
+  for (const key of ['view', 'pane', 'workspace', 'event', 'status', 'agent']) url.searchParams.delete(key);
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  window.history.replaceState(window.history.state, '', next || '/');
+  model.deepLink = null;
+}
+
+function returnToOverviewAfterAction(message = '') {
+  if (model.activeView !== 'attention') return;
+  clearAttentionDeepLink();
+  switchView('overview');
+  if (message) showToast(message);
+}
+
+function dismissAttention() {
+  model.attention = null;
+  clearAttentionDeepLink();
+  renderAttention();
+  switchView('overview');
+  announce('提醒已收起');
+  showToast('提醒已收起');
 }
 
 /**
@@ -1231,7 +1441,7 @@ function enterAttentionTarget() {
   void loadPaneOutput(target, { view: 'attention' });
 }
 
-function switchView(view) {
+function switchView(view, { focusHeading = true } = {}) {
   const requested = ['overview', 'output', 'focus', 'control', 'attention'].includes(view) ? view : 'overview';
   if (requested === 'attention' && !model.attention) return switchView('overview');
   const previousView = model.activeView;
@@ -1241,6 +1451,9 @@ function switchView(view) {
     const tab = $('tab-attention');
     if (tab) tab.hidden = false;
     enterAttentionTarget();
+  }
+  if (requested === 'output' && model.selectedPane && model.outputPaneId !== model.selectedPane && !model.outputLoading) {
+    void loadPaneOutput(model.selectedPane, { view: 'output', quiet: true });
   }
   document.querySelectorAll('.tab').forEach((tab) => {
     const active = tab.dataset.view === requested;
@@ -1263,6 +1476,9 @@ function switchView(view) {
     panel.hidden = !active;
     panel.tabIndex = active ? 0 : -1;
   });
+  // Attention locks the shared target; leaving that view must unlock it even
+  // when no new state or output request is needed for the next panel.
+  renderPaneSelect();
   // The mobile action bar is fixed to the viewport. Bring the selected panel
   // to the top when switching views so its heading and first controls are not
   // left underneath the bar after a tap from the overview screen.
@@ -1273,11 +1489,14 @@ function switchView(view) {
       window.scrollTo({ top, behavior: 'auto' });
     }
   }
-  if (requested === 'attention') {
+  if (requested === 'attention' && focusHeading) {
     const heading = $('attention-heading');
     if (heading) {
       heading.setAttribute('tabindex', '-1');
-      queueMicrotask(() => heading.focus({ preventScroll: true }));
+      const generation = model.sessionGeneration;
+      queueMicrotask(() => {
+        if (generation === model.sessionGeneration && model.activeView === 'attention' && model.authenticated) heading.focus({ preventScroll: true });
+      });
     }
   }
   // The active panel can change height when its controls are mounted (for
@@ -1320,25 +1539,22 @@ function scrollPageTo(top) {
 function protectMobileNavOverlap(view = model.activeView) {
   if (typeof window.matchMedia !== 'function' || !window.matchMedia('(max-width: 599px)').matches) return false;
   const currentScroll = currentPageScrollTop();
-  // Only protect the initial viewport. Once the user has scrolled, do not
-  // yank them back to the status cards during a background state refresh.
+  // Only protect the initial viewport. Background refreshes must not move
+  // someone who is already reading farther down the page.
   if (currentScroll > 2) return false;
   const nav = document.querySelector('.mobile-actions');
   const panel = document.getElementById(`${view}-view`);
   if (!nav || !panel || panel.hidden) return false;
-  // On very short screens the fixed action bar can cover the first status
-  // cards even when the page is at scrollY=0. Nudge only as much as needed;
-  // this keeps the brand/hero visible while making the first useful controls
-  // reachable without an immediate manual scroll.
-  // Prefer the first useful content block over the section heading itself.
-  // `querySelector` follows document order, so a combined selector would
-  // always pick the heading in the overview panel and miss cards hidden
-  // beneath the fixed action bar on short screens.
-  const target = panel.querySelector('.status-grid') || panel.querySelector('.section-heading, .control-target');
+  // The first task is actionable; connection details live in a closed
+  // disclosure and must never be used as a scrolling target.
+  const target = panel.querySelector('.task-card') || panel.querySelector('.section-heading, .control-target');
   if (!target) return false;
   const navRect = nav.getBoundingClientRect();
   const targetRect = target.getBoundingClientRect();
   if (!Number.isFinite(navRect.top) || !Number.isFinite(targetRect.bottom) || navRect.height <= 0 || targetRect.height <= 0) return false;
+  // A task entirely below the viewport can be reached by normal scrolling.
+  // Only correct an actual overlap with the fixed navigation.
+  if (targetRect.top >= navRect.bottom) return false;
   const limit = navRect.top - 12;
   const overlap = targetRect.bottom - limit;
   if (overlap <= 0) return false;
@@ -1459,15 +1675,18 @@ async function registerServiceWorker() {
 
 async function boot() {
   setAuthenticated(false);
+  const generation = model.sessionGeneration;
   void registerServiceWorker().catch(() => {});
   try {
-    await refreshState({ quiet: true });
+    const data = await refreshState({ quiet: true });
+    if (generation !== model.sessionGeneration || !data) return;
     setSessionMarker(true);
     setAuthenticated(true);
     connectStream();
     applyDeepLink();
     scheduleMobileNavProtection();
   } catch {
+    if (generation !== model.sessionGeneration) return;
     const cached = hasSessionMarker() ? restoreCachedState() : null;
     if (cached) {
       model.cachedState = cached;
@@ -1522,7 +1741,6 @@ function applyDeepLink() {
     model.selectedPane = link.pane;
     renderPaneSelect();
     switchView('output');
-    void loadPaneOutput(link.pane, { view: 'output' });
   } else if ((link.view === 'focus' || (!link.view && link.workspace)) && workspaceKnown) {
     switchView('focus');
     [...document.querySelectorAll('[data-focus-workspace]')].find((node) => node.dataset.focusWorkspace === link.workspace)?.scrollIntoView({ block: 'center' });
@@ -1548,12 +1766,12 @@ function setupTabKeyboard() {
     else if (event.key === 'End') next = visible.length - 1;
     else if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      switchView(current.dataset.view);
+      switchView(current.dataset.view, { focusHeading: false });
       return;
     } else return;
     event.preventDefault();
     const target = visible[next];
-    switchView(target.dataset.view);
+    switchView(target.dataset.view, { focusHeading: false });
     target.focus();
   });
   document.querySelectorAll('[role="tab"]').forEach((tab) => {
@@ -1581,6 +1799,8 @@ function setupConnectivityListeners() {
     restartPushStatus();
     if ($('push-delivery-status')) $('push-delivery-status').textContent = '当前设备离线，恢复网络后更新投递状态。';
     if (!model.authenticated) return;
+    cancelStateRequest();
+    invalidateOutputRequest();
     setConnection(false, '当前设备离线，显示最近一次状态；恢复网络后将自动同步。');
     closeStream();
   });
@@ -1652,7 +1872,7 @@ $('reveal-token').addEventListener('click', () => {
   $('reveal-token').setAttribute('aria-label', visible ? '显示令牌' : '隐藏令牌');
 });
 $('logout-button').addEventListener('click', logout);
-$('refresh-button').addEventListener('click', () => { $('refresh-button').classList.add('is-spinning'); void refreshState().finally(() => $('refresh-button').classList.remove('is-spinning')); });
+$('refresh-button').addEventListener('click', () => { $('refresh-button').classList.add('is-spinning'); void refreshState().catch(() => {}); });
 $('output-refresh').addEventListener('click', () => void loadPaneOutput());
 $('copy-output')?.addEventListener('click', () => void copyOutput());
 $('output-jump-latest')?.addEventListener('click', jumpOutputLatest);
@@ -1666,29 +1886,41 @@ $('attention-focus-button').addEventListener('click', () => {
   const pane = model.attention?.pane || model.selectedPane;
   if (pane) void focusPane(pane);
 });
-$('load-output').addEventListener('click', () => void loadPaneOutput($('output-pane').value));
-$('output-pane').addEventListener('change', (event) => {
-  model.selectedPane = event.target.value;
-  if ($('control-pane')) $('control-pane').value = model.selectedPane;
-  clearControlError('prompt-error');
-  clearControlError('input-error');
-  renderPaneSelect();
+$('attention-back').addEventListener('click', () => {
+  returnToOverviewAfterAction('已返回总览，待处理提醒仍保留');
 });
-$('control-pane').addEventListener('change', (event) => {
+$('attention-dismiss').addEventListener('click', dismissAttention);
+$('task-list')?.addEventListener('click', (event) => {
+  const paneId = event.target.closest('[data-open-pane]')?.dataset.openPane;
+  if (paneId) openTask(paneId);
+});
+$('context-pane').addEventListener('change', (event) => {
+  if (model.activeView === 'attention' && model.attention?.pane) return;
   model.selectedPane = event.target.value;
-  if ($('output-pane')) $('output-pane').value = model.selectedPane;
   clearControlError('prompt-error');
   clearControlError('input-error');
   renderPaneSelect();
+  if (model.selectedPane) {
+    const view = model.activeView === 'attention' ? 'attention' : model.activeView === 'output' ? 'output' : 'overview';
+    void loadPaneOutput(model.selectedPane, { view, quiet: true });
+  } else {
+    invalidateOutputRequest();
+    model.output = '';
+    model.outputPlain = '';
+    model.outputPaneId = '';
+    model.outputError = '';
+    renderOutput();
+  }
 });
 $('clear-output').addEventListener('click', () => {
+  invalidateOutputRequest();
   model.output = '';
   model.outputPlain = '';
   model.outputPaneId = model.selectedPane || '';
   model.outputError = '';
   renderOutput();
   renderAttention();
-  announce('输出已清空');
+  announce('已清除本页预览，电脑终端内容保持不变');
 });
 $('notification-toggle').addEventListener('click', () => setNotificationOpen(!model.notificationOpen));
 $('login-method').addEventListener('change', () => {
@@ -1718,7 +1950,7 @@ $('input-text').addEventListener('input', () => { clearControlError('input-error
 document.querySelectorAll('[data-input-key]').forEach((button) => {
   button.addEventListener('click', () => void sendPaneInput({ key: button.dataset.inputKey }));
 });
-document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view, { focusHeading: button.getAttribute('role') !== 'tab' })));
 
 setupTabKeyboard();
 setupOutputScrolling();

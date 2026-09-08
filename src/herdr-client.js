@@ -1,6 +1,7 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 export const ALLOWED_METHODS = Object.freeze([
   'session.snapshot',
@@ -278,6 +279,7 @@ export class HerdrSocketClient {
       let settled = false;
       let bytes = 0;
       let buffer = '';
+      const decoder = new StringDecoder('utf8');
       let timer;
       const socket = this.net.createConnection({ path: socketPath });
       const finish = (error, value) => {
@@ -306,9 +308,13 @@ export class HerdrSocketClient {
           finish(new HerdrSocketError('Herdr response exceeded the size limit'));
           return;
         }
-        buffer += chunk.toString('utf8');
-        const newline = buffer.indexOf('\n');
-        if (newline >= 0) finish(null, buffer.slice(0, newline).replace(/\r$/, ''));
+        // Socket chunks can split a UTF-8 character. Decode incrementally and
+        // scan only the new text so fragmented responses do not rescan the
+        // entire accumulated response on every data event.
+        const text = decoder.write(chunk);
+        const newline = text.indexOf('\n');
+        if (newline >= 0) finish(null, `${buffer}${text.slice(0, newline)}`.replace(/\r$/, ''));
+        else buffer += text;
       });
       socket.once('error', (error) => finish(new HerdrSocketError(`Herdr socket error: ${error.message}`, error)));
       socket.once('close', () => {

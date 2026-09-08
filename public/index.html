@@ -17,13 +17,16 @@
       <p class="eyebrow">HERDR / MOBILE BRIDGE</p>
       <h1 id="login-title">把会话带到手机上</h1>
       <p class="login-copy">输入电脑生成的配对码，查看智能体状态，并在需要时从手机发送任务或交互输入。</p>
-      <section class="connection-guide" aria-labelledby="connection-guide-title">
-        <div class="connection-guide-heading"><h2 id="connection-guide-title">连接到本机服务</h2><button type="button" class="text-button" id="discovery-refresh">重新检测</button></div>
-        <p id="discovery-status" class="discovery-status" role="status" aria-live="polite">正在检测局域网地址…</p>
-        <div id="discovery-urls" class="discovery-urls"></div>
-        <div class="discovery-actions"><button type="button" class="secondary-button" id="discovery-test">测试局域网连接</button><span id="discovery-test-status" role="status" aria-live="polite"></span></div>
-        <p id="discovery-hint" class="discovery-hint">二维码不会包含访问令牌。请确认手机与电脑在同一网络。</p>
-      </section>
+      <details class="connection-guide" id="connection-guide">
+        <summary class="connection-guide-summary"><span><strong>连接帮助</strong><small>找不到入口地址时，在这里检测局域网连接</small></span><span class="connection-guide-toggle" aria-hidden="true"><span class="connection-guide-expand">展开</span><span class="connection-guide-collapse">收起</span></span></summary>
+        <div class="connection-guide-body" aria-labelledby="connection-guide-title">
+          <div class="connection-guide-heading"><h2 id="connection-guide-title">连接到本机服务</h2><button type="button" class="text-button" id="discovery-refresh">重新检测</button></div>
+          <p id="discovery-status" class="discovery-status" role="status" aria-live="polite">正在检测局域网地址…</p>
+          <div id="discovery-urls" class="discovery-urls"></div>
+          <div class="discovery-actions"><button type="button" class="secondary-button" id="discovery-test">测试局域网连接</button><span id="discovery-test-status" role="status" aria-live="polite"></span></div>
+          <p id="discovery-hint" class="discovery-hint">二维码不会包含访问令牌。请确认手机与电脑在同一网络。</p>
+        </div>
+      </details>
       <form id="login-form" novalidate>
         <label for="login-method">登录方式</label>
         <select id="login-method"><option value="pair">配对码登录</option><option value="token">使用访问令牌</option></select>
@@ -47,90 +50,82 @@
       <div class="top-actions"><div class="connection" role="status" aria-live="polite"><span class="dot" id="status-dot"></span><span id="connection-label">连接中</span></div><div class="notification-menu" id="notification-menu"><button class="icon-button notification-toggle" id="notification-toggle" type="button" aria-label="打开通知设置" aria-expanded="false" aria-controls="push-card" aria-haspopup="dialog"><svg class="notification-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7M10 20h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></button><section class="push-card notification-popover" id="push-card" role="dialog" aria-labelledby="push-heading" hidden><div class="push-copy"><div class="push-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7M10 20h4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/></svg></div><div><p class="eyebrow">NOTIFICATIONS</p><h3 id="push-heading">任务提醒</h3><p>完成或阻塞时，在手机上收到轻量提醒。</p><p class="push-hint" id="push-hint">需要 HTTPS 和浏览器通知权限；HTTP 局域网仍可正常查看和控制。</p></div></div><button class="primary-button" id="push-button" type="button">开启提醒</button></section></div><button class="ghost-button" id="logout-button" type="button">退出</button></div>
     </header>
 
-    <section class="hero-card" aria-labelledby="agent-heading">
-      <div class="hero-meta"><span class="live-pill" id="live-pill"><span></span><span id="live-label">实时状态</span></span><span class="sync-detail" id="sync-detail" role="status" aria-live="polite">正在同步</span><time id="updated-at" datetime="">正在同步</time></div>
-      <div class="agent-row"><div class="agent-copy"><h2 id="agent-heading">等待会话</h2><p id="agent-detail">正在读取 Herdr 会话…</p></div><div class="agent-icon" aria-hidden="true">⌁</div></div>
-      <div class="metrics" aria-label="状态摘要"><div><b id="metric-state">—</b><span>状态</span></div><div><b id="metric-focus">—</b><span>当前聚焦</span></div><div><b id="metric-output">—</b><span>窗格数量</span></div></div>
+    <section class="task-context hero-card" id="pane-context" aria-labelledby="agent-heading">
+      <div class="task-context-copy"><div class="hero-meta"><p class="eyebrow" id="pane-context-title">当前操作的任务</p><span class="live-pill" id="live-pill"><span></span><span id="live-label">实时状态</span></span></div><h2 id="agent-heading">等待任务</h2><p id="agent-detail">正在读取 Herdr 会话…</p><p class="desktop-focus">电脑显示：<span id="desktop-focus">正在同步</span></p></div>
+      <div class="context-controls"><label for="context-pane">切换任务</label><select id="context-pane" aria-describedby="context-hint"><option value="">选择任务</option></select><p id="context-hint">输出和回复会使用这里选择的任务。</p></div>
+      <div class="context-sync"><span class="sync-detail" id="sync-detail" role="status" aria-live="polite">正在同步</span><time class="sr-only" id="updated-at" datetime="" aria-hidden="true">正在同步</time></div>
     </section>
 
     <div class="dashboard-grid">
       <div class="main-column">
-      <nav class="tabs" aria-label="控制台视图" role="tablist"><button class="tab is-active" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview-view" data-view="overview">总览</button><button class="tab" id="tab-output" role="tab" aria-selected="false" aria-controls="output-view" data-view="output">最近输出</button><button class="tab" id="tab-focus" role="tab" aria-selected="false" aria-controls="focus-view" data-view="focus">聚焦</button><button class="tab" id="tab-control" role="tab" aria-selected="false" aria-controls="control-view" data-view="control">控制</button><button class="tab attention-tab" id="tab-attention" role="tab" aria-selected="false" aria-controls="attention-view" data-view="attention" hidden><span>待处理</span><span class="attention-tab-badge" id="attention-tab-badge" aria-label="有新的待处理通知">!</span></button></nav>
+      <nav class="tabs" aria-label="控制台视图" role="tablist"><button class="tab is-active" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview-view" data-view="overview">总览</button><button class="tab" id="tab-output" role="tab" aria-selected="false" aria-controls="output-view" data-view="output">最近输出</button><button class="tab" id="tab-focus" role="tab" aria-selected="false" aria-controls="focus-view" data-view="focus">电脑显示</button><button class="tab" id="tab-control" role="tab" aria-selected="false" aria-controls="control-view" data-view="control">回复与任务</button><button class="tab attention-tab" id="tab-attention" role="tab" aria-selected="false" aria-controls="attention-view" data-view="attention" hidden><span>待处理</span><span class="attention-tab-badge" id="attention-tab-badge" aria-label="有新的待处理通知">!</span></button></nav>
 
     <section class="view is-hidden attention-view" id="attention-view" role="tabpanel" aria-labelledby="tab-attention" hidden>
-      <div class="section-heading"><div><p class="eyebrow">ACTION PANEL</p><h3 id="attention-heading" tabindex="-1">需要你的关注</h3></div><span class="attention-status" id="attention-status" data-status="unknown">—</span></div>
+      <div class="section-heading"><div><p class="eyebrow">ACTION PANEL</p><h3 id="attention-heading" tabindex="-1">需要你的关注</h3></div><div class="attention-heading-actions"><button class="text-button" id="attention-back" type="button">总览</button><button class="text-button" id="attention-dismiss" type="button">收起</button><span class="attention-status" id="attention-status" data-status="unknown">—</span></div></div>
       <div class="attention-summary" id="attention-summary" aria-live="polite">
         <div class="attention-summary-icon" aria-hidden="true">!</div>
         <div class="attention-summary-copy"><strong id="attention-agent">Herdr 会话</strong><p id="attention-detail">从通知打开的目标会显示在这里。</p></div>
       </div>
       <dl class="attention-meta" id="attention-meta"><div><dt>窗格</dt><dd id="attention-pane">—</dd></div><div><dt>工作区</dt><dd id="attention-workspace">—</dd></div><div><dt>事件</dt><dd id="attention-event">—</dd></div></dl>
-      <div class="attention-output-block">
-        <div class="section-heading attention-output-heading"><div><p class="eyebrow">RECENT OUTPUT</p><h4>最近输出</h4></div><div class="heading-actions"><button class="text-button" id="attention-output-refresh" type="button">刷新</button><button class="text-button" id="attention-copy-output" type="button">复制</button><button class="text-button" id="attention-jump-latest" type="button">跳到最新</button><button class="text-button" id="attention-focus-button" type="button">聚焦电脑窗格</button></div></div>
+      <div class="attention-output-block" id="attention-output-block">
+        <div class="section-heading attention-output-heading"><div><p class="eyebrow">RECENT OUTPUT</p><h4>最近输出</h4></div><div class="heading-actions"><button class="text-button" id="attention-output-refresh" type="button">刷新</button><button class="text-button" id="attention-copy-output" type="button">复制</button><button class="text-button" id="attention-jump-latest" type="button">跳到最新</button><button class="text-button" id="attention-focus-button" type="button">在电脑中打开</button></div></div>
         <pre class="output-console attention-output-console" id="attention-output-console" tabindex="0">正在等待通知目标…</pre>
         <p class="sr-only" id="attention-output-announcer" role="status" aria-live="polite"></p>
         <p class="attention-error" id="attention-error" role="alert" aria-live="polite"></p>
         <p class="privacy-note">输出只在本次请求中读取，不会保存到桥接服务。</p>
       </div>
-      <div class="attention-control-heading"><div><p class="eyebrow">RESPOND</p><h4>立即操作</h4></div><p>使用下面的输入直接回复该窗格。</p></div>
+      <div class="attention-control-heading" id="attention-control-heading"><p>确认上方输出后，直接输入回复。</p></div>
       <div class="attention-control-slot" id="attention-control-slot"></div>
     </section>
 
     <section class="view" id="overview-view" role="tabpanel" aria-labelledby="tab-overview">
-      <div class="section-heading"><div><p class="eyebrow">SESSION</p><h3>会话状态</h3></div><button class="icon-button" id="refresh-button" type="button" aria-label="刷新状态">↻</button></div>
-      <div class="status-grid" id="status-grid"><div class="skeleton-grid" aria-label="正在加载"><i></i><i></i><i></i><i></i></div></div>
+      <div class="section-heading"><div><p class="eyebrow">TASKS</p><h3 id="task-list-heading">任务列表</h3></div><button class="icon-button" id="refresh-button" type="button" aria-label="刷新任务">↻</button></div>
+      <div class="task-list" id="task-list" aria-labelledby="task-list-heading"><div class="empty-state">正在读取任务…</div></div>
       <div class="section-heading output-heading"><div><p class="eyebrow">LATEST OUTPUT</p><h3>最近输出</h3></div><button class="text-button" type="button" data-view="output">查看全部</button></div>
       <pre class="output-preview" id="output-preview" tabindex="0">正在等待输出…</pre>
       <p class="sr-only" id="output-status-announcer" role="status" aria-live="polite"></p>
+      <details class="session-details"><summary>连接详情</summary><div class="session-details-body"><div class="metrics" aria-label="会话摘要"><div><b id="metric-state">—</b><span>当前任务状态</span></div><div><b id="metric-focus">—</b><span>电脑显示</span></div><div><b id="metric-output">—</b><span>任务数量</span></div></div><div class="status-grid" id="status-grid"><div class="skeleton-grid" aria-label="正在加载"><i></i><i></i><i></i><i></i></div></div></div></details>
     </section>
 
     <section class="view is-hidden" id="output-view" role="tabpanel" aria-labelledby="tab-output" hidden>
-      <div class="section-heading"><div><p class="eyebrow">PANE OUTPUT</p><h3>最近输出</h3></div><div class="heading-actions"><button class="text-button" id="output-refresh" type="button">刷新</button><button class="text-button" id="copy-output" type="button">复制</button><button class="text-button" id="output-jump-latest" type="button">跳到最新</button><button class="text-button" id="clear-output" type="button">清空</button></div></div>
-      <div class="output-toolbar"><label for="output-pane">选择窗格</label><select id="output-pane"><option value="">先从聚焦页选择窗格</option></select><button class="secondary-button" id="load-output" type="button">读取</button></div>
+      <div class="section-heading"><div><p class="eyebrow">PANE OUTPUT</p><h3>最近输出</h3></div><div class="heading-actions"><button class="text-button" id="output-refresh" type="button">刷新</button><button class="text-button" id="copy-output" type="button">复制</button><button class="text-button" id="output-jump-latest" type="button">跳到最新</button><button class="text-button" id="clear-output" type="button">清除预览</button></div></div>
+      <div class="output-toolbar"><span class="output-toolbar-label">当前任务</span><strong class="output-target-label" id="output-target-label">未选择任务</strong></div>
       <pre class="output-console" id="output-console" tabindex="0">选择一个窗格后读取最近输出。</pre>
       <p class="sr-only" id="output-console-announcer" role="status" aria-live="polite"></p>
       <p class="privacy-note">输出只在本次请求中读取，不会保存到桥接服务。</p>
     </section>
 
     <section class="view is-hidden" id="focus-view" role="tabpanel" aria-labelledby="tab-focus" hidden>
-      <div class="section-heading"><div><p class="eyebrow">FOCUS</p><h3>聚焦会话</h3></div></div>
-      <p class="section-intro">切换电脑上当前可见的工作区和窗格。</p>
-      <div class="focus-list" id="focus-list"><div class="empty-state">暂无可聚焦的窗格</div></div>
+      <div class="section-heading"><div><p class="eyebrow">DESKTOP</p><h3>电脑显示</h3></div></div>
+      <p class="section-intro">在电脑中打开任务或工作区，手机当前选择保持不变。</p>
+      <div class="focus-list" id="focus-list"><div class="empty-state">暂无可打开的任务</div></div>
       <div class="section-heading workspace-heading"><div><p class="eyebrow">WORKSPACES</p><h3>工作区</h3></div></div>
-      <div class="focus-list" id="workspace-list"><div class="empty-state">暂无可聚焦的工作区</div></div>
+      <div class="focus-list" id="workspace-list"><div class="empty-state">暂无可打开的工作区</div></div>
     </section>
 
     <section class="view is-hidden" id="control-view" role="tabpanel" aria-labelledby="tab-control" hidden>
-      <div class="section-heading"><div><p class="eyebrow">REMOTE CONTROL</p><h3>控制窗格</h3></div></div>
-      <p class="section-intro">所有操作都会直接写入选中的 Herdr 窗格。发送任务前会再次确认；文本不会保存到桥接服务。</p>
+      <div class="section-heading"><div><p class="eyebrow">REPLY & TASKS</p><h3>回复与任务</h3></div></div>
+      <p class="section-intro">回复当前任务，或发送新的任务。文字不会保存到桥接服务。</p>
 
       <div id="control-surface-home">
         <div id="control-surface">
           <div class="control-target">
-            <label for="control-pane">目标窗格</label>
-            <select id="control-pane"><option value="">选择窗格</option></select>
-            <p class="control-hint" id="control-target-hint">先选择一个窗格。</p>
+            <span class="control-target-label">当前任务</span>
+            <strong class="control-target-name" id="control-target-name">未选择任务</strong>
+            <p class="control-hint" id="control-target-hint">先选择一个任务。</p>
           </div>
 
-          <form class="control-card" id="prompt-form" novalidate>
-            <div class="control-card-heading"><div><p class="eyebrow">AGENT PROMPT</p><h4>发送任务给智能体</h4></div><span class="control-badge">安全提交</span></div>
-            <label class="sr-only" for="prompt-text">任务内容</label>
-            <textarea id="prompt-text" rows="5" data-max-bytes="32768" aria-describedby="prompt-count" placeholder="例如：检查刚才的测试失败并给出修复方案。" spellcheck="true"></textarea>
-            <div class="control-meta"><span>会自动提交到当前智能体</span><span id="prompt-count">0 / 32K</span></div>
-            <p class="form-error" id="prompt-error" role="alert" aria-live="polite"></p>
-            <button class="primary-button full-width" type="submit" id="prompt-button"><span>发送任务</span><span class="button-spinner" aria-hidden="true"></span></button>
-          </form>
-
           <form class="control-card" id="input-form" novalidate>
-            <div class="control-card-heading"><div><p class="eyebrow">TERMINAL INPUT</p><h4>交互输入</h4></div><span class="control-badge muted">仅当前窗格</span></div>
-            <label class="sr-only" for="input-text">终端文字</label>
-            <textarea id="input-text" rows="3" data-max-bytes="8192" aria-describedby="input-count" placeholder="输入要写入终端的文字（可留空，仅发送按键）。" spellcheck="false"></textarea>
-            <div class="control-meta"><span>文字与按键会按一次操作发送</span><span id="input-count">0 / 8K</span></div>
+            <div class="control-card-heading"><div><p class="eyebrow">REPLY</p><h4>回复当前任务</h4></div><span class="control-badge muted">当前任务</span></div>
+            <label class="sr-only" for="input-text">回复内容</label>
+            <textarea id="input-text" rows="3" data-max-bytes="8192" aria-describedby="input-help input-count" placeholder="输入回复，例如：继续，使用推荐方案。" spellcheck="false"></textarea>
+            <div class="control-meta"><span id="input-help">“仅输入文字”不会自动回车。</span><span id="input-count">0 / 8K</span></div>
             <p class="form-error" id="input-error" role="alert" aria-live="polite"></p>
-            <button class="secondary-button full-width" type="submit" id="input-text-button"><span>发送文字</span><span class="button-spinner" aria-hidden="true"></span></button>
+            <div class="reply-actions"><button class="primary-button" type="button" data-input-key="enter"><span>输入并回车</span><span class="button-spinner" aria-hidden="true"></span></button><button class="secondary-button" type="submit" id="input-text-button"><span>仅输入文字</span><span class="button-spinner" aria-hidden="true"></span></button></div>
+            <details class="terminal-tools"><summary>终端按键</summary>
             <div class="keypad" aria-label="常用终端按键">
               <button type="button" class="key-button" data-input-key="escape">Esc</button>
               <button type="button" class="key-button" data-input-key="tab">Tab</button>
-              <button type="button" class="key-button" data-input-key="enter">Enter</button>
               <button type="button" class="key-button" data-input-key="backspace">⌫</button>
               <button type="button" class="key-button" data-input-key="up">↑</button>
               <button type="button" class="key-button" data-input-key="down">↓</button>
@@ -138,30 +133,31 @@
               <button type="button" class="key-button" data-input-key="right">→</button>
               <button type="button" class="key-button danger-key" data-input-key="ctrl+c">Ctrl+C</button>
             </div>
+            </details>
           </form>
-          <p class="privacy-note">控制请求需要登录会话和 CSRF 校验；桥接服务只转发上面列出的操作，不开放任意 Herdr API。</p>
+          <details class="new-task-tools"><summary><span>发送新任务</span><small>确认后提交给当前智能体</small></summary>
+            <form class="control-card" id="prompt-form" novalidate>
+              <div class="control-card-heading"><h4>发送新任务</h4><span class="control-badge">发送前确认</span></div>
+              <label class="sr-only" for="prompt-text">任务内容</label>
+              <textarea id="prompt-text" rows="5" data-max-bytes="32768" aria-describedby="prompt-count" placeholder="例如：检查刚才的测试失败并给出修复方案。" spellcheck="true"></textarea>
+              <div class="control-meta"><span>会自动提交到当前智能体</span><span id="prompt-count">0 / 32K</span></div>
+              <p class="form-error" id="prompt-error" role="alert" aria-live="polite"></p>
+              <button class="primary-button full-width" type="submit" id="prompt-button"><span>发送新任务</span><span class="button-spinner" aria-hidden="true"></span></button>
+            </form>
+          </details>
+          <p class="privacy-note">输入只发送到当前选择的任务。Ctrl+C 等中断操作会再次确认。</p>
         </div>
       </div>
     </section>
 
       </div>
-      <aside class="utility-rail" aria-label="快捷操作">
-        <section class="rail-card quick-actions-card">
-          <div class="section-heading"><div><p class="eyebrow">SHORTCUTS</p><h3>快速入口</h3></div><span class="rail-kicker" aria-hidden="true">⌘</span></div>
-          <div class="quick-actions">
-            <button class="quick-action" type="button" data-view="output"><span><strong>最近输出</strong><small>查看窗格日志</small></span><span aria-hidden="true">↗</span></button>
-            <button class="quick-action" type="button" data-view="focus"><span><strong>聚焦会话</strong><small>切换工作区或窗格</small></span><span aria-hidden="true">↗</span></button>
-            <button class="quick-action" type="button" data-view="control"><span><strong>控制窗格</strong><small>发送任务或输入</small></span><span aria-hidden="true">↗</span></button>
-          </div>
-        </section>
-      </aside>
     </div>
 
     <nav class="mobile-actions" aria-label="手机快捷操作">
       <button type="button" data-view="overview"><span aria-hidden="true">⌂</span><span>总览</span></button>
       <button type="button" data-view="output"><span aria-hidden="true">▤</span><span>输出</span></button>
-      <button type="button" data-view="focus"><span aria-hidden="true">◎</span><span>聚焦</span></button>
-      <button type="button" data-view="control"><span aria-hidden="true">✦</span><span>控制</span></button>
+      <button type="button" data-view="focus"><span aria-hidden="true">◎</span><span>电脑显示</span></button>
+      <button type="button" data-view="control" aria-label="回复与任务"><span aria-hidden="true">✦</span><span>回复</span></button>
       <button type="button" id="mobile-attention" data-view="attention" hidden><span aria-hidden="true">!</span><span>待处理</span></button>
     </nav>
     <div class="offline-banner" id="offline-banner" role="status" hidden>暂时离线，正在重试连接…</div>

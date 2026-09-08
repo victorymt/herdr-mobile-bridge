@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { JSDOM } from 'jsdom';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('responsive console keeps discovery controls and selectors at touch size', async () => {
+test('responsive console keeps discovery controls and selectors at touch size', async (t) => {
   const [html, css, app] = await Promise.all([
     readFile(join(ROOT, 'public', 'index.html'), 'utf8'),
     readFile(join(ROOT, 'public', 'styles.css'), 'utf8'),
@@ -18,15 +19,35 @@ test('responsive console keeps discovery controls and selectors at touch size', 
   assert.match(html, /role="tablist"/);
   assert.match(html, /id="notification-toggle"[^>]+aria-expanded="false"[^>]+aria-controls="push-card"/);
   assert.match(html, /class="push-card notification-popover" id="push-card"[^>]+hidden/);
+  assert.match(html, /<details class="connection-guide" id="connection-guide">/);
+  assert.match(html, /id="context-pane"/);
+  assert.match(html, /id="attention-back"/);
+  assert.match(html, /id="attention-dismiss"/);
   assert.match(html, /data-max-bytes="32768"/);
   assert.match(html, /data-max-bytes="8192"/);
   assert.match(app, /class="discovery-link"/);
   assert.match(app, /outputScrollState = new WeakMap/);
   assert.match(app, /previousView !== requested/);
-  assert.match(css, /\.discovery-url \.secondary-button, \.discovery-actions button \{ min-height: 44px; \}/);
-  assert.match(css, /select, \.token-field input \{ min-height: 44px; \}/);
+  const dom = new JSDOM(html);
+  t.after(() => dom.window.close());
+  const style = dom.window.document.createElement('style');
+  style.textContent = css;
+  dom.window.document.head.appendChild(style);
+  // Discovery rows are produced at runtime; use their actual class contract
+  // to check the CSS cascade instead of depending on duplicated CSS rules.
+  const discoveryRow = dom.window.document.createElement('div');
+  discoveryRow.className = 'discovery-url';
+  discoveryRow.innerHTML = '<button class="secondary-button">复制地址</button>';
+  dom.window.document.body.appendChild(discoveryRow);
+  for (const selector of ['.discovery-url .secondary-button', '.discovery-actions button', 'select', '.token-field input']) {
+    const controls = [...dom.window.document.querySelectorAll(selector)];
+    assert.ok(controls.length > 0, `expected controls matching ${selector}`);
+    for (const control of controls) {
+      assert.ok(Number.parseFloat(dom.window.getComputedStyle(control).minHeight) >= 44, `${selector} must retain a 44px touch target`);
+    }
+  }
   assert.match(css, /\.tabs \{ display: none; \}/);
-  assert.match(css, /\.main-column > \.view \{ padding-bottom:/);
+  assert.match(css, /@media \(max-width: \d+px\)[\s\S]*\.shell\s*\{[^}]*padding:[^;}]*safe-area-inset-bottom/);
   assert.match(css, /\.notification-menu \{ position: relative;/);
   assert.match(css, /\.notification-popover \{/);
   assert.match(app, /notificationOpen: false/);
@@ -65,7 +86,7 @@ test('output view requests ANSI snapshots and keeps clipboard output plain', asy
 test('short mobile screens schedule overlap protection after layout and viewport changes', async () => {
   const app = await readFile(join(ROOT, 'public', 'app.js'), 'utf8');
   assert.match(app, /function protectMobileNavOverlap\(view = model\.activeView\)/);
-  assert.match(app, /panel\.querySelector\('\.status-grid'\) \|\| panel\.querySelector\('\.section-heading, \.control-target'\)/);
+  assert.match(app, /panel\.querySelector\('\.task-card'\)/);
   assert.match(app, /function scheduleMobileNavProtection\(\)/);
   assert.match(app, /requestAnimationFrame/);
   assert.match(app, /document\.scrollingElement/);

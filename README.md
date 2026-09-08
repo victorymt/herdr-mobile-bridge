@@ -18,7 +18,10 @@ linking or installing it.
 
 - Linux
 - Herdr 0.7.0 or newer
-- Node.js 20 or newer and npm
+- Node.js 22.13 or newer for dependency installation with pnpm 11.25.0;
+  Node.js 24 is the development default. The installed application supports
+  Node.js 20 or newer.
+- Corepack, which selects the pnpm version pinned in `package.json`
 - A trusted LAN connection from the phone; use the included LAN proxy or a
   manually started `socat` forward. An HTTPS reverse proxy may be bound to a
   LAN/VPN interface when browser Web Push is required, but no public endpoint
@@ -34,7 +37,8 @@ opening it on a phone points at the phone itself rather than this service.
 From this directory:
 
 ```bash
-npm ci
+corepack enable
+pnpm install --frozen-lockfile
 herdr plugin link /data/project/herdr-mobile-bridge
 herdr plugin config-dir herdr.mobile-bridge
 herdr plugin list --plugin herdr.mobile-bridge
@@ -49,7 +53,7 @@ gateway. The hook exits quickly; the gateway is a separate process managed by
 If you do not want to edit `bridge.json` by hand, run the interactive wizard:
 
 ```bash
-npm run configure
+pnpm run configure
 ```
 
 The Chinese-language wizard asks for the access mode, ports, LAN interface, and
@@ -365,13 +369,22 @@ are needed; never forward the bridge port to the public internet.
 ## Development
 
 ```bash
-npm ci
-npm test
-npm run check
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm test
 ```
 
-The tests use Node's built-in test runner and a fake Unix socket; no running
-Herdr server or real push provider is required. The manifest can be validated
+`pnpm-lock.yaml` is the dependency lockfile. Use Node.js 22.13 or newer for
+pnpm commands. CI installs the frozen lockfile on Node.js 24, then checks
+syntax and runs the full test suite on Node.js 20, 22, and 24. To run those
+checks with an already installed dependency tree on Node.js 20, use
+`node scripts/check.js` and `node --test` directly.
+
+The syntax check automatically discovers `.js`, `.mjs`, and `.cjs` files
+under `src`, `public`, and `scripts`, including nested directories. Tests use
+Node's built-in test runner, jsdom for page interactions, and local test
+HTTP/Unix socket servers; no running Herdr server, browser download, or real
+push provider is required. The manifest can be validated
 with `herdr plugin link <path> --disabled` in a disposable Herdr environment.
 
 ## Configuration files

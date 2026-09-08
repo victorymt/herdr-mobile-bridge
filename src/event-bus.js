@@ -145,6 +145,21 @@ function eventFingerprint(payload, eventName, context) {
   return `hash:${createHash('sha256').update(JSON.stringify(stable)).digest('hex')}`;
 }
 
+function anonymousStatusTransition(dedupKey, eventName, context, previous = {}) {
+  if (!dedupKey.startsWith('hash:') || !context.pane_id
+    || !(STATUS_EVENTS.has(eventName) || DETECTED_EVENTS.has(eventName))) return false;
+  // Without an event ID, an identical context can describe a later lifecycle.
+  // Compare with durable current state before treating its historical hash as
+  // a retry. Explicit event IDs always retain their original dedup semantics.
+  const statusField = eventName === 'pane_agent_detected' ? 'final_status' : 'agent_status';
+  const incoming = sanitizePaneStatus(context.pane_id, context);
+  const current = sanitizePaneStatus(context.pane_id, previous);
+  const status = incoming[statusField];
+  return (status !== undefined && status !== current[statusField])
+    || (context.released === true && status === undefined && current[statusField] !== undefined)
+    || ['agent', 'display_agent'].some((field) => incoming[field] !== undefined && incoming[field] !== current[field]);
+}
+
 /** Bounded in-process event fanout with optional durable deduplication. */
 export class EventBus {
   constructor(options = {}) {
@@ -221,7 +236,15 @@ export class EventBus {
     const context = canonicalContext(payload, eventName);
     const dedupKey = eventFingerprint(payload, eventName, context);
     if (this.store?.transactEvents) return this.processDurable(payload, eventName, context, dedupKey);
-    if (this.store && !(await this.store.markSeen(dedupKey))) {
+    let previousStatus;
+    const statusEvent = (STATUS_EVENTS.has(eventName) || DETECTED_EVENTS.has(eventName)) && context.pane_id;
+    if (this.store && statusEvent) {
+      try {
+        previousStatus = (await this.store.listPaneStatuses())[context.pane_id];
+      } catch { /* status persistence is best effort */ }
+    }
+    if (this.store && !(await this.store.markSeen(dedupKey))
+      && !(previousStatus && anonymousStatusTransition(dedupKey, eventName, context, previousStatus))) {
       return { accepted: true, duplicate: true, dedup_key: dedupKey, event: eventName };
     }
 
@@ -240,14 +263,6 @@ export class EventBus {
       socket_path: socketPath,
       received_at: new Date(this.clock()).toISOString(),
     });
-
-    let previousStatus;
-    const statusEvent = (STATUS_EVENTS.has(eventName) || DETECTED_EVENTS.has(eventName)) && context.pane_id;
-    if (this.store && statusEvent) {
-      try {
-        previousStatus = (await this.store.listPaneStatuses())[context.pane_id];
-      } catch { /* status persistence is best effort */ }
-    }
 
     const status = eventName === 'pane_agent_detected' ? context.final_status : context.agent_status;
     const terminal = TERMINAL_STATUSES.has(status);
@@ -303,11 +318,12 @@ export class EventBus {
     const socketPath = payload.socket_path || payload.socketPath || this.socketPath;
     const envelope = { id: payload.event_id || payload.eventId || randomUUID(), event: eventName, context, socket_path: socketPath, received_at: new Date(now).toISOString() };
     const result = await this.store.transactEvents((next, subscriptions) => {
-      if (next.dedup[dedupKey] >= now - this.store.dedupTtlMs) return { duplicate: true, push: null };
-      pruneDeliveries(next, subscriptions, now);
       const paneId = context.pane_id;
       const statusEvent = Boolean(paneId && (STATUS_EVENTS.has(eventName) || DETECTED_EVENTS.has(eventName)));
       const previous = Object.hasOwn(next.pane_statuses, paneId) ? next.pane_statuses[paneId] : {};
+      if (next.dedup[dedupKey] >= now - this.store.dedupTtlMs
+        && !anonymousStatusTransition(dedupKey, eventName, context, previous)) return { duplicate: true, push: null };
+      pruneDeliveries(next, subscriptions, now);
       const statusField = eventName === 'pane_agent_detected' ? 'final_status' : 'agent_status';
       const status = context[statusField];
       const agent = context.agent || context.display_agent || previous.agent || previous.display_agent || '';
@@ -341,7 +357,9 @@ export class EventBus {
         if (next.deliveries.length + subscriptions.length > 1000) throw Object.assign(new Error('push queue is full'), { status: 503, code: 'push_queue_full' });
         const notification = makePushPayload(envelope);
         for (const subscription of subscriptions) {
-          next.deliveries.push({ id: createHash('sha256').update(`${dedupKey}\0${subscription.id}`).digest('hex'), subscription_id: subscription.id, pane_id: paneId, payload: notification, expires_at: now + 300_000, next_attempt_at: now, attempts: 0 });
+          // Separate repeated anonymous lifecycles so an older in-flight
+          // delivery cannot acknowledge or remove this new task.
+          next.deliveries.push({ id: createHash('sha256').update(`${dedupKey}\0${envelope.id}\0${subscription.id}`).digest('hex'), subscription_id: subscription.id, pane_id: paneId, payload: notification, expires_at: now + 300_000, next_attempt_at: now, attempts: 0 });
         }
         push = { queued: subscriptions.length };
       }

@@ -140,6 +140,92 @@ test('new lifecycle cancels old pending notifications but allows done again', as
   assert.equal(setup.store.deliveries.length, 1);
 });
 
+test('anonymous status lifecycles survive restarts and still suppress immediate retries', async (context) => {
+  const setup = await fixture(context);
+  const anonymous = (status) => {
+    const payload = event(undefined, status);
+    delete payload.event_id;
+    return payload;
+  };
+  await setup.bus.processIncoming(anonymous('done'));
+  const firstDeliveryId = setup.store.deliveries[0].id;
+  assert.equal((await setup.bus.processIncoming(anonymous('done'))).duplicate, true);
+  await setup.bus.processIncoming(anonymous('working'));
+  const restored = new StateStore({ stateDir: setup.root, clock: setup.clock });
+  const manager = new PushManager({ store: restored, clock: setup.clock });
+  context.after(() => manager.worker.close());
+  const bus = new EventBus({ store: restored, pushManager: manager, clock: setup.clock });
+  const repeated = await bus.processIncoming(anonymous('done'));
+  assert.equal(repeated.duplicate, false);
+  assert.equal((await restored.listPaneStatuses())['pane-1'].agent_status, 'done');
+  assert.equal(restored.deliveries.length, 1);
+  assert.notEqual(restored.deliveries[0].id, firstDeliveryId);
+  assert.equal((await bus.processIncoming(anonymous('done'))).duplicate, true);
+});
+
+test('anonymous detector release permits a fresh terminal lifecycle', async (context) => {
+  const setup = await fixture(context);
+  const detected = { event: 'pane.agent_detected', context: { pane_id: 'pane-1', agent: 'test-agent', final_status: 'done' } };
+  const released = { event: 'pane.agent_detected', context: { pane_id: 'pane-1', agent: 'test-agent', released: true } };
+  for (let lifecycle = 0; lifecycle < 2; lifecycle += 1) {
+    assert.equal((await setup.bus.processIncoming(detected)).duplicate, false);
+    assert.equal(setup.store.deliveries.length, 1);
+    assert.equal((await setup.bus.processIncoming(detected)).duplicate, true);
+    assert.equal((await setup.bus.processIncoming(released)).duplicate, false);
+    assert.equal(setup.store.deliveries.length, 0);
+    assert.equal((await setup.bus.processIncoming(released)).duplicate, true);
+  }
+});
+
+test('anonymous retries compare metadata using the persisted field bounds', async (context) => {
+  const setup = await fixture(context);
+  const payload = event(undefined);
+  payload.context.agent = 'a'.repeat(240);
+  assert.equal((await setup.bus.processIncoming(payload)).duplicate, false);
+  assert.equal((await setup.bus.processIncoming(payload)).duplicate, true);
+  assert.equal(setup.store.deliveries.length, 1);
+});
+
+test('anonymous display-agent retries retain the pending notification when an agent is already known', async (context) => {
+  const setup = await fixture(context);
+  await setup.bus.processIncoming({ event: 'pane.agent_status_changed', context: { pane_id: 'pane-1', agent: 'codex', agent_status: 'working' } });
+  const done = { event: 'pane.agent_status_changed', context: { pane_id: 'pane-1', display_agent: 'Codex', agent_status: 'done' } };
+  assert.equal((await setup.bus.processIncoming(done)).duplicate, false);
+  assert.equal(setup.store.deliveries.length, 1);
+  const deliveryId = setup.store.deliveries[0].id;
+  assert.equal((await setup.bus.processIncoming(done)).duplicate, true);
+  assert.equal(setup.store.deliveries.length, 1);
+  assert.equal(setup.store.deliveries[0].id, deliveryId);
+});
+
+test('an old anonymous delivery acknowledgement cannot remove a new lifecycle task', async (context) => {
+  let started;
+  const sending = new Promise((resolve) => { started = resolve; });
+  let release;
+  const setup = await fixture(context, () => new Promise((resolve) => { release = resolve; started(); }));
+  await setup.bus.processIncoming(event(undefined));
+  setup.manager.worker.stopped = false;
+  await setup.manager.worker.pump();
+  await sending;
+  await setup.bus.processIncoming(event(undefined, 'working'));
+  const repeated = await setup.bus.processIncoming(event(undefined));
+  setup.manager.worker.stopped = true;
+  release({ status: 201 });
+  await Promise.all([...setup.manager.worker.active.values()]);
+  assert.equal(repeated.duplicate, false);
+  assert.equal(setup.store.deliveries.length, 1);
+  assert.equal(setup.store.deliveries[0].attempts, 0);
+});
+
+test('explicit event identifiers remain deduplicated across lifecycle transitions', async (context) => {
+  const setup = await fixture(context);
+  await setup.bus.processIncoming(event('original-done'));
+  await setup.bus.processIncoming(event('new-working', 'working'));
+  assert.equal((await setup.bus.processIncoming(event('original-done'))).duplicate, true);
+  assert.equal((await setup.store.listPaneStatuses())['pane-1'].agent_status, 'working');
+  assert.equal(setup.store.deliveries.length, 0);
+});
+
 test('slow sender does not block later events and concurrency stays bounded', async (context) => {
   const releases = [];
   const setup = await fixture(context, () => new Promise((resolve) => releases.push(resolve)));

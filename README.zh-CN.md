@@ -14,7 +14,9 @@
 
 - Linux
 - Herdr 0.7.0 或更高版本
-- Node.js 20 或更高版本，以及 npm
+- 使用 pnpm 11.25.0 安装依赖需要 Node.js 22.13 或更高版本，开发默认使用 Node.js 24；
+  安装后的应用支持 Node.js 20 或更高版本。
+- Corepack，用于选择 `package.json` 固定的 pnpm 版本
 - 手机与主机之间有可信的局域网连接。可以使用内置 LAN proxy，或手动启动 `socat`
   转发。需要浏览器 Web Push 时，可以把 HTTPS 反向代理绑定到 LAN/VPN 网卡；不需要
   暴露公网端点。
@@ -28,7 +30,8 @@
 在此目录执行：
 
 ```bash
-npm ci
+corepack enable
+pnpm install --frozen-lockfile
 herdr plugin link /data/project/herdr-mobile-bridge
 herdr plugin config-dir herdr.mobile-bridge
 herdr plugin list --plugin herdr.mobile-bridge
@@ -42,7 +45,7 @@ Herdr 启动时，插件的启动钩子会幂等地启动本地网关。钩子�
 不熟悉 `bridge.json` 时，直接运行交互式向导：
 
 ```bash
-npm run configure
+pnpm run configure
 ```
 
 向导会用中文逐步询问访问方式、端口、LAN 网卡和可选的安全设置，自动探测可用网卡，
@@ -298,13 +301,19 @@ curl -fsS http://127.0.0.1:8787/healthz
 ## 开发
 
 ```bash
-npm ci
-npm test
-npm run check
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm test
 ```
 
-测试使用 Node 内置的测试运行器和一个伪 Unix socket，不需要运行中的 Herdr 服务或真实的推送
-服务商。可以在一次性的 Herdr 环境中用
+依赖统一由 `pnpm-lock.yaml` 锁定，pnpm 命令需要 Node.js 22.13 或更高版本。CI 先在
+Node.js 24 上冻结安装依赖，再分别使用 Node.js 20、22、24 执行语法检查与完整测试。
+如需在 Node.js 20 上检查已经安装依赖的项目，可直接执行 `node scripts/check.js` 和
+`node --test`。
+
+语法检查自动扫描 `src`、`public`、`scripts` 及其子目录中的 `.js`、`.mjs`、`.cjs`
+文件。测试使用 Node 内置的测试运行器、用于页面交互的 jsdom，以及本地 HTTP/Unix socket
+测试服务器，不需要运行中的 Herdr 服务、下载浏览器或真实的推送服务商。可以在一次性的 Herdr 环境中用
 `herdr plugin link <path> --disabled` 校验插件清单。
 
 ## 配置文件
